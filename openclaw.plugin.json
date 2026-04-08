@@ -1,0 +1,10 @@
+{
+  "id": "openclaw-interaction-bridge",
+  "name": "OpenClaw Interaction Bridge",
+  "description": "Bridge OpenClaw agent state to companion display via mission-control API",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
