@@ -6,6 +6,9 @@ import { z } from "zod";
 // Store pending approvals (request_id -> flow_id mapping)
 const pendingApprovals = new Map<string, string>();
 
+// Track if an approval is currently in progress
+let currentApprovalInProgress: string | null = null;
+
 export const requestUserApprovalSchema = z.object({
   action: z.string().describe("The action requiring approval (e.g., 'delete_file', 'send_email')"),
   message: z.string().describe("Human-readable message explaining what needs approval"),
@@ -17,12 +20,36 @@ export type RequestUserApprovalInput = z.infer<typeof requestUserApprovalSchema>
  * Request user approval using TaskFlow
  * Creates a managed TaskFlow, sets it to waiting state, and returns flowId
  * The webhook will resume this flow when user responds via snarling
+ * 
+ * LIMITATION: Only 1 approval request allowed at a time
  */
 export async function requestUserApproval(
   input: RequestUserApprovalInput,
   ctx: any
 ): Promise<string> {
   const { action, message } = input;
+
+  // Check if an approval is already in progress
+  if (currentApprovalInProgress) {
+    const existingRequestId = currentApprovalInProgress;
+    const existingFlowId = pendingApprovals.get(existingRequestId);
+    
+    if (existingFlowId) {
+      return `⚠️ **Approval Request Blocked**
+
+Another approval is already in progress:
+- Request ID: ${existingRequestId}
+- Status: Waiting for user response
+
+Please respond to the existing request on your snarling display before requesting new approvals.
+
+**Blocked Action:** ${action}`;
+    } else {
+      // Stale entry, clear it
+      currentApprovalInProgress = null;
+    }
+  }
+
   const requestId = `approval-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
   // Get TaskFlow API from runtime
@@ -51,8 +78,9 @@ export async function requestUserApproval(
 
   const flowId = created.flowId;
 
-  // Store the mapping for webhook lookup
+  // Store the mapping for webhook lookup AND track global lock
   pendingApprovals.set(requestId, flowId);
+  currentApprovalInProgress = requestId;
 
   // Set the flow to waiting state
   // This will cause the agent to pause and wait for the webhook to resume
@@ -79,6 +107,7 @@ export async function requestUserApproval(
   if (!waiting.applied) {
     // Clean up if waiting state failed
     pendingApprovals.delete(requestId);
+    currentApprovalInProgress = null;
     throw new Error(`Failed to set approval flow to waiting: ${waiting.code || "unknown error"}`);
   }
 
@@ -164,8 +193,9 @@ export async function resumeApprovalFlow(
     },
   });
 
-  // Clean up pending approval
+  // Clean up pending approval and clear global lock
   pendingApprovals.delete(requestId);
+  currentApprovalInProgress = null;
 
   return {
     success: true,
