@@ -1,6 +1,8 @@
 // ~/.openclaw/extensions/openclaw-interaction-bridge/index.ts
 // OpenClaw Interaction Bridge Plugin - Updates mission-control API with agent state
 
+import approvalTool from "./approval_tool";
+
 const MISSION_CONTROL_URL = "http://localhost:3000/api/status";
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const IDLE_DELAY_MS = 30000;
@@ -38,6 +40,7 @@ export default {
   name: "OpenClaw Interaction Bridge",
 
   register(api: any) {
+    // State monitoring hooks
     api.on("before_tool_call", (event: any) => {
       updateState("processing", event.sessionKey);
     });
@@ -45,5 +48,8 @@ export default {
     api.on("before_agent_reply", (event: any) => {
       updateState("speaking", event.sessionKey);
     });
+
+    // Register approval tool
+    approvalTool.register(api);
   }
 };
