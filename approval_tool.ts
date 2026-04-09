@@ -1,20 +1,16 @@
 // approval_tool.ts - TaskFlow-based approval tool for OpenClaw Interaction Bridge
 // This tool creates a managed TaskFlow that waits for user approval via snarling display
 
-import { z } from "zod";
-
 // Store pending approvals (request_id -> flow_id mapping)
 const pendingApprovals = new Map<string, string>();
 
 // Track if an approval is currently in progress
 let currentApprovalInProgress: string | null = null;
 
-export const requestUserApprovalSchema = z.object({
-  action: z.string().describe("The action requiring approval (e.g., 'delete_file', 'send_email')"),
-  message: z.string().describe("Human-readable message explaining what needs approval"),
-});
-
-export type RequestUserApprovalInput = z.infer<typeof requestUserApprovalSchema>;
+export interface RequestUserApprovalInput {
+  action: string;
+  message: string;
+}
 
 /**
  * Request user approval using TaskFlow
@@ -156,6 +152,7 @@ export async function resumeApprovalFlow(
   const flow = await taskFlowApi.get(flowId);
   if (!flow) {
     pendingApprovals.delete(requestId);
+    currentApprovalInProgress = null;
     return {
       success: false,
       message: `TaskFlow not found: ${flowId}`,
