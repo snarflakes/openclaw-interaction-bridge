@@ -14,7 +14,7 @@ git clone https://github.com/snarflakes/openclaw-interaction-bridge.git \
   ~/.openclaw/extensions/openclaw-interaction-bridge
 
 # Restart OpenClaw or reload plugins
-openclaw plugin reload
+openclaw plugin openclaw-interaction-bridge enable
 ```
 
 ## Configuration
