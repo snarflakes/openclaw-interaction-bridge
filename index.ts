@@ -3,7 +3,7 @@
 // - Updates mission-control API with agent state (processing/speaking/idle)
 // - Registers approval callback HTTP route for snarling button responses
 
-import { requestUserApproval, resumeApprovalFlow } from "./approval_tool.js";
+import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool.js";
 
 const MISSION_CONTROL_URL = "http://localhost:3000/api/status";
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -181,8 +181,24 @@ export default {
             requesterOrigin: "snarling-webhook"
           });
 
+          // Get system API for waking the agent session
+          const systemApi = api.runtime?.system;
+          if (!systemApi?.enqueueSystemEvent || !systemApi?.requestHeartbeatNow) {
+            console.error(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
+          }
+
           try {
-            const result = await resumeApprovalFlow(request_id, approved === true, boundTaskFlow);
+            const result = await resumeApprovalFlow(
+              request_id,
+              approved === true,
+              boundTaskFlow,
+              systemApi ?? { enqueueSystemEvent: () => {}, requestHeartbeatNow: () => {} },
+              sessionKey
+            );
+
+            // Safety net: always clear the lock after handling a callback,
+            // even if resumeApprovalFlow had partial failures
+            forceClearApprovalLock(request_id);
 
             if (result.success) {
               res.statusCode = 200;
@@ -193,6 +209,8 @@ export default {
             }
           } catch (error) {
             console.error(`[approval-callback] Error: ${error}`);
+            // Even on exception, clear the lock so it doesn't get stuck
+            forceClearApprovalLock(request_id);
             res.statusCode = 500;
             res.end(JSON.stringify({ error: "Failed to resume TaskFlow", details: String(error), request_id }));
           }

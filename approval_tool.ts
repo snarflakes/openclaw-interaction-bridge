@@ -1,11 +1,20 @@
 // approval_tool.ts - TaskFlow-based approval tool for OpenClaw Interaction Bridge
 // Creates a managed TaskFlow that waits for user approval via snarling display
 
-// Store pending approvals (request_id -> flow_id mapping)
-const pendingApprovals = new Map<string, string>();
+// Store pending approvals (request_id -> { flowId, createdAt })
+interface PendingEntry {
+  flowId: string;
+  createdAt: number;
+}
+const pendingApprovals = new Map<string, PendingEntry>();
 
 // Track if an approval is currently in progress (global lock)
+// Now includes timestamp for staleness detection
 let currentApprovalInProgress: string | null = null;
+let currentApprovalStartedAt: number | null = null;
+
+// Maximum time an approval lock is valid before it's considered stale (30 minutes)
+const APPROVAL_LOCK_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface RequestUserApprovalInput {
   action: string;
@@ -13,11 +22,57 @@ export interface RequestUserApprovalInput {
 }
 
 /**
+ * Check if the current approval lock is stale or orphaned, and clear it if so.
+ * Returns true if the lock was cleared.
+ */
+function clearStaleLock(): boolean {
+  if (!currentApprovalInProgress) return false;
+
+  // Check 1: Is the lock entry missing from pendingApprovals? (orphaned)
+  const entry = pendingApprovals.get(currentApprovalInProgress);
+  if (!entry) {
+    console.error(`[approval-tool] Clearing orphaned lock: ${currentApprovalInProgress} (no matching pending entry)`);
+    currentApprovalInProgress = null;
+    currentApprovalStartedAt = null;
+    return true;
+  }
+
+  // Check 2: Has the lock been held too long? (stale/timeout)
+  const elapsed = Date.now() - (currentApprovalStartedAt ?? entry.createdAt);
+  if (elapsed > APPROVAL_LOCK_TIMEOUT_MS) {
+    console.error(`[approval-tool] Clearing stale lock: ${currentApprovalInProgress} (held for ${Math.round(elapsed / 60000)}min, timeout=${APPROVAL_LOCK_TIMEOUT_MS / 60000}min)`);
+    pendingApprovals.delete(currentApprovalInProgress);
+    currentApprovalInProgress = null;
+    currentApprovalStartedAt = null;
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Force-clear the approval lock. Called by webhook handler after successful
+ * flow resumption, or as a safety net.
+ */
+export function forceClearApprovalLock(requestId?: string): void {
+  if (requestId && currentApprovalInProgress !== requestId) {
+    // The lock belongs to a different request — only clear if stale
+    clearStaleLock();
+    return;
+  }
+  if (requestId) {
+    pendingApprovals.delete(requestId);
+  }
+  currentApprovalInProgress = null;
+  currentApprovalStartedAt = null;
+}
+
+/**
  * Request user approval using TaskFlow.
  * Creates a managed TaskFlow, sets it to waiting state, and notifies snarling.
  * The webhook callback will resume this flow when user responds.
  *
- * LIMITATION: Only 1 approval request allowed at a time.
+ * If another approval is in progress, it checks for staleness before blocking.
  */
 export async function requestUserApproval(
   input: RequestUserApprovalInput,
@@ -25,14 +80,14 @@ export async function requestUserApproval(
 ): Promise<string> {
   const { action, message } = input;
 
-  // Global lock: only one approval at a time
+  // Check and clear stale/orphaned locks before deciding to block
+  clearStaleLock();
+
+  // Global lock: only one approval at a time (with stale detection)
   if (currentApprovalInProgress) {
-    const existingFlowId = pendingApprovals.get(currentApprovalInProgress);
-    if (existingFlowId) {
-      return `⚠️ Approval request blocked — another approval is already in progress (ID: ${currentApprovalInProgress}). Respond to that one first.\n\nBlocked action: ${action}`;
-    }
-    // Stale entry, clear it
-    currentApprovalInProgress = null;
+    const entry = pendingApprovals.get(currentApprovalInProgress);
+    // Should still exist since clearStaleLock didn't clear it
+    return `⚠️ Approval request blocked — another approval is already in progress (ID: ${currentApprovalInProgress}, started ${entry ? Math.round((Date.now() - entry.createdAt) / 60000) + 'min ago' : 'recently'}). Respond to that one first.\n\nBlocked action: ${action}`;
   }
 
   const requestId = `approval-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
@@ -61,10 +116,12 @@ export async function requestUserApproval(
   }
 
   const flowId = created.flowId;
+  const now = Date.now();
 
   // Store mapping and set global lock
-  pendingApprovals.set(requestId, flowId);
+  pendingApprovals.set(requestId, { flowId, createdAt: now });
   currentApprovalInProgress = requestId;
+  currentApprovalStartedAt = now;
 
   // Set the flow to waiting state (agent pauses here)
   const waiting = await taskFlow.setWaiting({
@@ -91,6 +148,7 @@ export async function requestUserApproval(
     // Clean up on failure
     pendingApprovals.delete(requestId);
     currentApprovalInProgress = null;
+    currentApprovalStartedAt = null;
     const detail = waiting ? JSON.stringify(waiting) : "null result";
     throw new Error(`Failed to set approval flow to waiting: ${detail}`);
   }
@@ -122,73 +180,104 @@ export async function requestUserApproval(
 /**
  * Resume a waiting approval TaskFlow with the user's decision.
  * Called by the webhook handler when user presses A/B on snarling.
+ * After resuming the flow, wakes the agent session so it can continue.
  */
 export async function resumeApprovalFlow(
   requestId: string,
   approved: boolean,
-  taskFlowApi: any
+  taskFlowApi: any,
+  systemApi: { enqueueSystemEvent: (text: string, opts: { sessionKey: string }) => void; requestHeartbeatNow: (opts: { reason: string; sessionKey: string }) => void },
+  sessionKey: string
 ): Promise<{ success: boolean; message: string }> {
-  const flowId = pendingApprovals.get(requestId);
+  const entry = pendingApprovals.get(requestId);
 
-  if (!flowId) {
+  if (!entry) {
+    // No matching entry — but still try to clear the lock if it matches
+    if (currentApprovalInProgress === requestId) {
+      console.error(`[approval-tool] Clearing lock for missing entry: ${requestId}`);
+      currentApprovalInProgress = null;
+      currentApprovalStartedAt = null;
+    }
     return { success: false, message: `No pending approval found for request: ${requestId}` };
   }
 
-  // Get current flow state
-  // taskFlowApi.get may return a FlowRecord directly or { flow: FlowRecord }
-  const getResult = await taskFlowApi.get(flowId);
-  const flow = getResult?.flow ?? getResult;
-  if (!flow || !flow.flowId) {
+  const flowId = entry.flowId;
+
+  try {
+    // Get current flow state
+    const getResult = await taskFlowApi.get(flowId);
+    const flow = getResult?.flow ?? getResult;
+    if (!flow || !flow.flowId) {
+      pendingApprovals.delete(requestId);
+      forceClearApprovalLock(requestId);
+      return { success: false, message: `TaskFlow not found: ${flowId}` };
+    }
+
+    // Resume the flow with the approval decision
+    const resumed = await taskFlowApi.resume({
+      flowId,
+      expectedRevision: flow.revision,
+      status: "running",
+      currentStep: "approval_responded",
+      stateJson: {
+        ...flow.stateJson,
+        approved,
+        respondedAt: Date.now(),
+      },
+    });
+
+    if (!resumed || !resumed.applied) {
+      // Resume failed — clean up the lock anyway since we got a response
+      pendingApprovals.delete(requestId);
+      forceClearApprovalLock(requestId);
+      return { success: false, message: `Failed to resume flow: ${resumed?.reason || "unknown error"}` };
+    }
+
+    // Finish the flow
+    const finished = await taskFlowApi.finish({
+      flowId,
+      expectedRevision: resumed.flow.revision,
+      stateJson: {
+        ...resumed.flow.stateJson,
+        approved,
+        respondedAt: Date.now(),
+      },
+    });
+
+    if (!finished || !finished.applied) {
+      // Flow was resumed but couldn't be finished — still a success
+      // since the approval decision was recorded
+      console.error(`[approval-tool] Warning: could not finish flow ${flowId}: ${finished?.reason || "unknown"}`);
+    }
+
+    // Wake the agent session so it can continue processing
+    const approvalResult = approved ? "APPROVED" : "REJECTED";
+    const decision = flow.stateJson?.action || flow.stateJson?.message || requestId;
+    try {
+      systemApi.enqueueSystemEvent(
+        `User approval response: ${approvalResult}. ${approved ? "Proceeding with the action." : "Action cancelled by user."} (request: ${requestId})`,
+        { sessionKey }
+      );
+      systemApi.requestHeartbeatNow({
+        reason: "approval-callback",
+        sessionKey
+      });
+      console.error(`[approval-tool] Enqueued system event and requested heartbeat for session ${sessionKey}`);
+    } catch (wakeErr) {
+      console.error(`[approval-tool] Warning: failed to wake agent session: ${wakeErr}`);
+    }
+
+    return { success: true, message: `Approval ${approved ? "APPROVED" : "REJECTED"} for ${requestId}` };
+  } finally {
+    // ALWAYS clean up, regardless of success or failure in individual steps
     pendingApprovals.delete(requestId);
-    currentApprovalInProgress = null;
-    return { success: false, message: `TaskFlow not found: ${flowId}` };
+    forceClearApprovalLock(requestId);
   }
-
-  // Resume the flow with the approval decision
-  const resumed = await taskFlowApi.resume({
-    flowId,
-    expectedRevision: flow.revision,
-    status: "running",
-    currentStep: "approval_responded",
-    stateJson: {
-      ...flow.stateJson,
-      approved,
-      respondedAt: Date.now(),
-    },
-  });
-
-  // resume returns { applied: true, flow: FlowRecord } or { applied: false, reason: string }
-  if (!resumed || !resumed.applied) {
-    return { success: false, message: `Failed to resume flow: ${resumed?.reason || "unknown error"}` };
-  }
-
-  // Finish the flow — returns { applied: true, flow: FlowRecord } or { applied: false, reason: string }
-  const finished = await taskFlowApi.finish({
-    flowId,
-    expectedRevision: resumed.flow.revision,
-    stateJson: {
-      ...resumed.flow.stateJson,
-      approved,
-      respondedAt: Date.now(),
-    },
-  });
-
-  if (!finished || !finished.applied) {
-    // Flow was resumed but couldn't be finished — still consider it a success
-    // since the approval decision was recorded
-    console.error(`[approval-tool] Warning: could not finish flow ${flowId}: ${finished?.reason || "unknown"}`);
-  }
-
-  // Clean up
-  pendingApprovals.delete(requestId);
-  currentApprovalInProgress = null;
-
-  return { success: true, message: `Approval ${approved ? "APPROVED" : "REJECTED"} for ${requestId}` };
 }
 
 /**
  * Get the flowId for a pending approval request.
  */
 export function getPendingApprovalFlowId(requestId: string): string | undefined {
-  return pendingApprovals.get(requestId);
+  return pendingApprovals.get(requestId)?.flowId;
 }
