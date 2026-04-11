@@ -7,7 +7,8 @@ import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from 
 
 const SNARLING_URL = "http://localhost:5000/state";
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
-const IDLE_DELAY_MS = 30000;
+const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
+let lastState = ""; // Track last state sent to avoid duplicates
 
 // Track if HTTP route is registered (only register once)
 let routeRegistered = false;
@@ -27,16 +28,31 @@ function mapToSnarlingState(status: string): string {
 
 async function updateState(status: string, sessionId: string) {
   try {
-    if (idleTimeout) {
-      clearTimeout(idleTimeout);
-      idleTimeout = null;
+    // Map to snarling state
+    const isCommunicating = status === "speaking";
+    const stateToSend = isCommunicating ? "communicating" : mapToSnarlingState(status);
+
+    // Only send if state changed (avoid flooding)
+    if (stateToSend === lastState) {
+      // State unchanged, just reset the idle timer
+      if (idleTimeout) clearTimeout(idleTimeout);
+      idleTimeout = setTimeout(() => {
+        lastState = "";
+        void fetch(SNARLING_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ state: "sleeping", timestamp: Date.now() })
+        });
+        idleTimeout = null;
+      }, IDLE_DELAY_MS);
+      return;
     }
 
-    const snarlingState = mapToSnarlingState(status);
-    const isCommunicating = status === "speaking";
+    lastState = stateToSend;
 
-    // If speaking, send "communicating" to snarling; otherwise send mapped state
-    const stateToSend = isCommunicating ? "communicating" : snarlingState;
+    // Clear existing idle timer
+    if (idleTimeout) clearTimeout(idleTimeout);
+    idleTimeout = null;
 
     void fetch(SNARLING_URL, {
       method: "POST",
@@ -44,14 +60,16 @@ async function updateState(status: string, sessionId: string) {
       body: JSON.stringify({ state: stateToSend, timestamp: Date.now() })
     });
 
-    // Set idle timeout for processing and speaking states
+    // Set idle timeout — after no new activity, go to sleeping
     if (status === "processing" || status === "speaking") {
       idleTimeout = setTimeout(() => {
+        lastState = "";
         void fetch(SNARLING_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ state: "sleeping", timestamp: Date.now() })
         });
+        idleTimeout = null;
       }, IDLE_DELAY_MS);
     }
   } catch (_e) {
