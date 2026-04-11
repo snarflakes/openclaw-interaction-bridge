@@ -84,15 +84,13 @@ export default {
   register(api: any) {
     // State monitoring hooks - track when agent is processing or speaking
     api.on("before_tool_call", (event: any) => {
-      if (event.ctx?.sessionKey) {
-        updateState("processing", event.ctx.sessionKey);
-      }
+      const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
+      updateState("processing", sessionKey);
     });
 
     api.on("before_agent_reply", (event: any) => {
-      if (event.ctx?.sessionKey) {
-        updateState("speaking", event.ctx.sessionKey);
-      }
+      const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
+      updateState("speaking", sessionKey);
     });
 
     // Register the approval tool
