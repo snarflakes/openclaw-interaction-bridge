@@ -7,7 +7,7 @@ import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from 
 
 const SNARLING_URL = "http://localhost:5000/state";
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
-const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
+const IDLE_DELAY_MS = 30000; // 30 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
 
 // Track if HTTP route is registered (only register once)
