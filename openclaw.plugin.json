@@ -1,7 +1,7 @@
 {
   "id": "openclaw-interaction-bridge",
   "name": "OpenClaw Interaction Bridge",
-  "description": "Bridge OpenClaw agent state to companion display via mission-control API",
+  "description": "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

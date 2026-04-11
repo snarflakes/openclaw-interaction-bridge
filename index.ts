@@ -1,16 +1,29 @@
 // ~/.openclaw/extensions/openclaw-interaction-bridge/index.ts
 // OpenClaw Interaction Bridge Plugin
-// - Updates mission-control API with agent state (processing/speaking/idle)
+// - Sends agent state updates directly to snarling (processing/speaking/idle)
 // - Registers approval callback HTTP route for snarling button responses
 
 import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool.js";
 
-const MISSION_CONTROL_URL = "http://localhost:3000/api/status";
+const SNARLING_URL = "http://localhost:5000/state";
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const IDLE_DELAY_MS = 30000;
 
 // Track if HTTP route is registered (only register once)
 let routeRegistered = false;
+
+// Map OpenClaw agent states to snarling states
+function mapToSnarlingState(status: string): string {
+  switch (status) {
+    case "processing":
+    case "speaking":
+      return "processing";
+    case "idle":
+      return "sleeping";
+    default:
+      return "sleeping";
+  }
+}
 
 async function updateState(status: string, sessionId: string) {
   try {
@@ -19,24 +32,30 @@ async function updateState(status: string, sessionId: string) {
       idleTimeout = null;
     }
 
-    void fetch(MISSION_CONTROL_URL, {
+    const snarlingState = mapToSnarlingState(status);
+    const isCommunicating = status === "speaking";
+
+    // If speaking, send "communicating" to snarling; otherwise send mapped state
+    const stateToSend = isCommunicating ? "communicating" : snarlingState;
+
+    void fetch(SNARLING_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status, sessionId, timestamp: Date.now() })
+      body: JSON.stringify({ state: stateToSend, timestamp: Date.now() })
     });
 
     // Set idle timeout for processing and speaking states
     if (status === "processing" || status === "speaking") {
       idleTimeout = setTimeout(() => {
-        void fetch(MISSION_CONTROL_URL, {
+        void fetch(SNARLING_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "idle", sessionId, timestamp: Date.now() })
+          body: JSON.stringify({ state: "sleeping", timestamp: Date.now() })
         });
       }, IDLE_DELAY_MS);
     }
   } catch (_e) {
-    // Silent fail - mission control is optional
+    // Silent fail - snarling is optional
   }
 }
 
