@@ -1,7 +1,7 @@
 {
   "id": "openclaw-interaction-bridge",
   "name": "OpenClaw Interaction Bridge",
-  "description": "Bridge OpenClaw agent state directly to snarling display via HTTP API",
+  "description": "Bridge OpenClaw agent activity to an endpoint of your choice (state tracking + approval requests)",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

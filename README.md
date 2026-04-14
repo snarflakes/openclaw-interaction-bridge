@@ -1,11 +1,11 @@
 # OpenClaw Interaction Bridge
 
-A plugin that bridges OpenClaw agent activity to [Snarling](https://github.com/snarflakes/snarling) — a physical status companion with a DisplayHAT Mini screen and approval buttons.
+A plugin that bridges OpenClaw agent activity to an endpoint of your choice — demo with [Snarling](https://github.com/snarflakes/snarling), a physical status and request approval companion with a DisplayHAT Mini screen and buttons.
 
 ## What It Does
 
-- **State tracking**: Automatically sends agent state changes (processing, communicating, sleeping) to the Snarling display
-- **Physical approvals**: Registers a `request_user_approval` tool that routes approval requests to the Snarling display — users press button A to approve, button B to reject
+- **State tracking**: Automatically sends agent state changes (processing, communicating, sleeping) to a configured endpoint
+- **Physical approvals**: Registers a `request_user_approval` tool that routes approval requests to a configured endpoint — demo with Snarling's A/B buttons
 
 ## Installation
 
@@ -87,11 +87,10 @@ Interaction Bridge Plugin
 Snarling Display (Python services on ports 5000/5001)
 ```
 
-## Publishing
+## Install from ClawHub
 
 ```bash
-clawhub package publish snarflakes/openclaw-interaction-bridge --dry-run
-clawhub package publish snarflakes/openclaw-interaction-bridge
+openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
 ```
 
 ## Development
