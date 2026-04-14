@@ -1,0 +1,148 @@
+---
+name: openclaw_interaction_bridge
+description: "Use the Snarling physical display and A/B button approval system connected to this agent. When loaded, Snarling is already working — state changes (processing, communicating, sleeping) appear on the display automatically. Use request_user_approval for yes/no decisions before destructive or external actions: deleting files, sending emails, publishing packages, deploying to production, transferring funds."
+metadata:
+  openclaw:
+    emoji: "🟥"
+    requires:
+      bins: ["curl"]
+---
+
+# OpenClaw Interaction Bridge 🟥
+
+> Agent state on a screen. Approvals on a button. No keyboard required.
+
+This plugin bridges your OpenClaw agent to [Snarling](https://github.com/snarflakes/snarling) — a Raspberry Pi + DisplayHAT Mini companion that shows what the agent is doing and lets you approve or reject actions with physical A/B buttons.
+
+## What It Does
+
+### State Display
+
+The plugin hooks into OpenClaw events and POSTs state updates to Snarling's display server:
+
+| Agent Activity | Snarling Shows | Trigger |
+|---|---|---|
+| Using tools | `processing` | `before_tool_call` |
+| Generating response | `communicating` | `before_agent_reply` |
+| 30s idle | `sleeping` | Auto-timeout |
+
+Duplicates are suppressed — only state *changes* are sent. After 30 seconds of no activity, the display automatically goes to sleep.
+
+### Physical Approvals — `request_user_approval`
+
+The plugin registers a `request_user_approval` tool that routes yes/no decisions to Snarling's physical A/B buttons. **Use this tool whenever you need a human decision before proceeding with an action.**
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | Yes | Short verb phrase, max **24 chars** (e.g., `delete_file`, `send_email`, `publish_skill`). Shown on the display header line. |
+| `message` | string | Yes | Brief explanation, max **60 chars** ideal, **80 chars** hard limit. Shown as 2 lines of ~29 chars each on the physical display. Keep it concise — long text gets truncated. (e.g., `Delete /tmp/old-logs? Cannot undo.`) |
+
+#### When to Use
+
+- **Before destructive actions**: deleting files, dropping databases, overwriting configs
+- **Before external actions**: sending emails, posting to social, making API calls that change state
+- **Before irreversible operations**: publishing packages, deploying to production, transferring funds
+- **When uncertain**: if you're not sure the user would want you to proceed, ask first
+
+#### When NOT to Use
+
+- Reading files, checking status, browsing — these are safe internal actions
+- When the answer is obvious and the user explicitly asked you to do it
+- In group chats or shared channels (the approval goes to a single physical device)
+
+#### How It Works
+
+1. You call `request_user_approval({ action, message })`
+2. Plugin creates a TaskFlow and sets it to waiting
+3. Snarling displays the request on screen with an A/B button prompt
+4. Human presses **A** (approve) or **B** (reject)
+5. Snarling forwards the decision to the plugin's `/approval-callback` route
+6. Plugin resumes the TaskFlow and returns the result
+
+The tool **blocks** until a response comes back. Only one approval at a time — if another is in progress, the call returns an error message instead of blocking.
+
+#### Return Values
+
+- `✅ APPROVED` — proceed with the action
+- `❌ REJECTED` — do not proceed; respect the user's decision
+- `⏰ Timed out` — no response within 30 minutes; treat as rejected
+- `⚠️ Approval request blocked` — another approval is already waiting; finish that one first
+
+#### Example
+
+```
+request_user_approval({
+  action: "delete_file",
+  message: "Delete old-config.yaml? 90d old, cannot undo."
+})
+```
+
+**Bad example** (too long, gets truncated on display):
+```
+request_user_approval({
+  action: "delete_important_configuration_file",  // too long for header
+  message: "Delete /home/pi/old-config.yaml? This file has not been modified in 90 days and contains important settings."  // way too long
+})
+```
+
+## Setup
+
+### Prerequisites
+
+- Raspberry Pi with DisplayHAT Mini
+- [Snarling](https://github.com/snarflakes/snarling) running (state server on port 5000, approval server on port 5001)
+- OpenClaw gateway >= 2026.3.24-beta.2
+
+### Install
+
+```bash
+# Clone to your OpenClaw extensions directory
+git clone https://github.com/snarflakes/openclaw-interaction-bridge.git \
+  ~/.openclaw/extensions/openclaw-interaction-bridge
+
+# Install dependencies
+cd ~/.openclaw/extensions/openclaw-interaction-bridge
+npm install
+
+# Restart OpenClaw
+openclaw gateway restart
+```
+
+### Custom Targets
+
+To point at something other than the default Snarling ports (e.g., a Tauri app, mobile web view), edit the constants at the top of `index.ts`:
+
+```typescript
+const SNARLING_URL = "http://localhost:5000/state";       // → your state endpoint
+const APPROVAL_URL = "http://localhost:5001/approval/request"; // → your approval endpoint
+const CALLBACK_URL = "http://localhost:18789/approval-callback"; // → your callback endpoint
+```
+
+No config file needed yet — when there are multiple adapters, a config-driven system will make sense. For now, editing the source is simpler and more honest.
+
+## Architecture
+
+```
+OpenClaw Agent
+      ↓ (plugin hooks: before_tool_call, before_agent_reply)
+Interaction Bridge Plugin
+      ↓ (POST localhost:5000/state)            ← state updates
+      ↓ (POST localhost:5001/approval/request)  ← approval requests
+      ↑ (POST localhost:18789/approval-callback) ← approval responses
+Snarling Display (Python services on ports 5000/5001)
+```
+
+## Troubleshooting
+
+- **Display not updating**: Check that Snarling's state server is running on port 5000 (`curl -s http://localhost:5000/state`)
+- **Approvals not working**: Verify the approval server is on port 5001 and the callback route is accessible
+- **Stuck approval lock**: Wait 30 minutes for the stale timeout, or restart the gateway
+- **Plugin not loading**: Check `openclaw gateway restart` logs for errors; verify `npm install` completed
+
+## Install from ClawHub
+
+```bash
+openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
+```
