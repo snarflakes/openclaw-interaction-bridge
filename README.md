@@ -4,8 +4,8 @@ A plugin that bridges OpenClaw agent activity to an endpoint of your choice — 
 
 ## What It Does
 
-- **State tracking**: Automatically sends agent state changes (processing, communicating, sleeping) to the Snarling display
-- **Physical approvals**: Registers a `request_user_approval` tool that routes approval requests to the Snarling display — users press button A to approve, button B to reject
+- **State tracking**: Automatically sends agent state changes (processing, communicating, sleeping) to a configured endpoint
+- **Physical approvals**: Registers a `request_user_approval` tool that routes approval requests to a configured endpoint — demo with Snarling's A/B buttons
 
 ## Installation
 
