@@ -14,15 +14,9 @@ A plugin that bridges OpenClaw agent activity to [Snarling](https://github.com/s
 git clone https://github.com/snarflakes/openclaw-interaction-bridge.git \
   ~/.openclaw/extensions/openclaw-interaction-bridge
 
-# Restart OpenClaw or reload plugins
-openclaw plugin openclaw-interaction-bridge enable
-```
-
-## Configuration
-
-By default, the plugin POSTs to Mission Control at `http://localhost:3000/api/status`.
-
-To change the endpoint, edit `index.ts`:
+# Install dependencies
+cd ~/.openclaw/extensions/openclaw-interaction-bridge
+npm install
 
 # Restart OpenClaw
 openclaw gateway restart
