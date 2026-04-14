@@ -1,10 +1,11 @@
 # OpenClaw Interaction Bridge
 
-A plugin that bridges OpenClaw agent activity to external displays — like [Snarling](https://github.com/snarflakes/snarling), a physical status companion.
+A plugin that bridges OpenClaw agent activity to [Snarling](https://github.com/snarflakes/snarling) — a physical status companion with a DisplayHAT Mini screen and approval buttons.
 
 ## What It Does
 
-This plugin automatically tracks your OpenClaw agent's activity and reports state changes to a configured endpoint. This enables external displays to show real-time status without manual updates.
+- **State tracking**: Automatically sends agent state changes (processing, communicating, sleeping) to the Snarling display
+- **Physical approvals**: Registers a `request_user_approval` tool that routes approval requests to the Snarling display — users press button A to approve, button B to reject
 
 ## Installation
 
@@ -23,118 +24,92 @@ By default, the plugin POSTs to Mission Control at `http://localhost:3000/api/st
 
 To change the endpoint, edit `index.ts`:
 
-```typescript
-const MISSION_CONTROL_URL = "http://your-host:3000/api/status";
+# Restart OpenClaw
+openclaw gateway restart
 ```
 
-Or for file-based output (no Mission Control):
+### Prerequisites
+
+- [Snarling](https://github.com/snarflakes/snarling) running on a Raspberry Pi with DisplayHAT Mini (state server on port 5000, approval server on port 5001)
+- OpenClaw gateway >= 2026.3.24-beta.2
+
+## Configuration
+
+No config needed for the default Snarling setup. The plugin works out of the box with Snarling's default ports.
+
+### Custom URLs Without Config (Simple Approach)
+
+Right now, there's no setup wizard, no config UI, and `openclaw.json` doesn't have special handling for plugin-specific fields. Editing `openclaw.json` by hand to add adapter config is the same amount of work as editing the URL constants directly in the plugin code.
+
+**To use a custom target (Tauri, mobile web, phone, etc.) right now, just edit the constants at the top of `index.ts`:**
 
 ```typescript
-const STATE_FILE_PATH = "/home/pi/snarling/state.json";
+// Change these to point to your own interaction surface
+const SNARLING_URL = "http://localhost:5000/state"; // → your state endpoint
+const APPROVAL_URL = "http://localhost:5001/approval/request"; // → your approval endpoint
+const CALLBACK_URL = "http://localhost:18789/approval-callback"; // → your callback endpoint
 ```
+
+The adapter architecture (config-driven selection, `openclaw.json` entries, setup wizard) will be worth building when there are actually multiple adapters to choose from. Until then, editing the source is honest and simple — same effort as editing a config file, but no indirection.
 
 ## How It Works
 
-The plugin hooks into OpenClaw events:
+### State Updates
 
-| Event | Status Sent | Typical Duration |
-|-------|-------------|----------------|
-| `before_tool_call` | `processing` | While tools run |
-| `before_agent_reply` | `speaking` | While generating response |
-| 30s idle timeout | `idle` | Until next activity |
+The plugin hooks into OpenClaw events and POSTs state to Snarling:
 
-Each status update includes:
-- `status`: idle, processing, or speaking
-- `sessionId`: Current session identifier
+| OpenClaw Event | Snarling State | Meaning |
+|----------------|----------------|---------|
+| `before_tool_call` | `processing` | Agent is using tools |
+| `before_agent_reply` | `communicating` | Agent is generating a response |
+| 30s idle timeout | `sleeping` | No recent activity |
+
+Each update includes:
+- `state`: processing, communicating, or sleeping
 - `timestamp`: Unix timestamp (ms)
 
-## Example Implementation: Snarling
+### Approval Flow
 
-[Snarling](https://github.com/snarflakes/snarling) is a Raspberry Pi-powered display that shows your agent's status at a glance.
+When the agent calls `request_user_approval`:
 
-**Setup flow:**
-1. Install this plugin in OpenClaw
-2. Install Snarling on a Raspberry Pi with display
-3. Configure Snarling to poll `http://your-pi-ip:3000/api/status`
-4. Done — your agent's status appears on the physical display
+1. Plugin creates a TaskFlow and sets it to waiting state
+2. POSTs approval request to Snarling's approval server (port 5001)
+3. Snarling displays the request on screen with A/B button prompt
+4. User presses A (approve) or B (reject)
+5. Snarling forwards the decision to the plugin's `/approval-callback` HTTP route
+6. Plugin resumes the TaskFlow and returns the result to the agent
 
-See the Snarling repo for hardware build instructions and service setup.
+Only one approval at a time — subsequent requests are blocked until the current one is resolved (with a 30-minute stale timeout as a safety net).
 
-## Agent Prompt
-
-Feed this prompt to your agent to enable the bridge:
+## Architecture
 
 ```
-You are now running with the OpenClaw Interaction Bridge plugin enabled.
+OpenClaw Agent
+      ↓ (plugin hooks: before_tool_call, before_agent_reply)
+Interaction Bridge Plugin
+      ↓ (POST localhost:5000/state)           ← state updates
+      ↓ (POST localhost:5001/approval/request) ← approval requests
+      ↑ (POST localhost:18789/approval-callback) ← approval responses
+Snarling Display (Python services on ports 5000/5001)
+```
 
-## What's Already Set Up
+## Publishing
 
-- Interaction Bridge plugin installed at `~/.openclaw/extensions/openclaw-interaction-bridge`
-- Snarling display hardware ready and polling for status
-- Mission Control API running at `http://localhost:3000/api/status`
-
-## What Happens Automatically
-
-The bridge watches your OpenClaw activity and reports state changes:
-
-| Event | Status Sent | Snarling Shows |
-|-------|-------------|----------------|
-| You start using tools | `processing` | Working indicator |
-| You begin replying | `speaking` | Active/talking |
-| 30 seconds idle | `idle` | Resting state |
-
-## For Users WITH Mission Control
-
-Snarling should poll: `http://your-pi-ip:3000/api/status`
-
-Mission Control handles the state file and serves it to Snarling.
-
-## For Users WITHOUT Mission Control
-
-If you don't have Mission Control running, configure the bridge to write 
-directly to Snarling's state file:
-
-Edit `~/.openclaw/extensions/openclaw-interaction-bridge/index.ts`:
-
-Change:
-  const MISSION_CONTROL_URL = "http://localhost:3000/api/status"
-
-To:
-  const STATE_FILE_PATH = "/home/pi/snarling/state.json"
-
-Then modify `updateState()` to write JSON to that file instead of HTTP POST.
-
-Snarling will read the local file directly.
-
-## Verify It's Working
-
-Check Snarling display updates when you:
-- Run a tool (shows "processing")
-- Generate a response (shows "speaking")
-- Wait 30 seconds (shows "idle")
+```bash
+clawhub package publish snarflakes/openclaw-interaction-bridge --dry-run
+clawhub package publish snarflakes/openclaw-interaction-bridge
 ```
 
 ## Development
 
 ```bash
 git checkout development
+# make changes
 git add .
 git commit -m "feature: description"
 git push origin development
 ```
 
-## Architecture
-
-```
-OpenClaw Agent
-      ↓ (plugin hooks)
-Interaction Bridge
-      ↓ (POST or file write)
-Mission Control API / State File
-      ↓ (HTTP poll or file read)
-External Display (Snarling, etc.)
-```
-
 ## Credits
 
-Built by Snar for the OpenClaw ecosystem. Inspired by the Pwnagotchi project's approach to ambient companion devices.
+Built by [Snar](https://github.com/snarflakes) for the OpenClaw ecosystem.
