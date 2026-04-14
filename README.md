@@ -1,6 +1,6 @@
 # OpenClaw Interaction Bridge
 
-A plugin that bridges OpenClaw agent activity to [Snarling](https://github.com/snarflakes/snarling) — a physical status companion with a DisplayHAT Mini screen and approval buttons.
+A plugin that bridges OpenClaw agent activity to an endpoint of your choice — demo with [Snarling](https://github.com/snarflakes/snarling), a physical status and request approval companion with a DisplayHAT Mini screen and buttons.
 
 ## What It Does
 
