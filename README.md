@@ -87,11 +87,10 @@ Interaction Bridge Plugin
 Snarling Display (Python services on ports 5000/5001)
 ```
 
-## Publishing
+## Install from ClawHub
 
 ```bash
-clawhub package publish snarflakes/openclaw-interaction-bridge --dry-run
-clawhub package publish snarflakes/openclaw-interaction-bridge
+openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
 ```
 
 ## Development
