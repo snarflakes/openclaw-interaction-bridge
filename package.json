@@ -1,10 +1,24 @@
 {
   "name": "openclaw-interaction-bridge",
   "version": "1.0.0",
-  "description": "Bridge OpenClaw agent state to companion display via mission-control API",
+  "description": "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   "main": "index.ts",
   "type": "module",
   "peerDependencies": {
-    "openclaw": "*"
+    "openclaw": ">=2026.3.24-beta.2"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.0"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.4.5",
+      "pluginSdkVersion": "2026.4.5"
+    }
   }
 }
