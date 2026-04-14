@@ -4,8 +4,6 @@ description: "Use the Snarling physical display and A/B button approval system c
 metadata:
   openclaw:
     emoji: "🟥"
-    requires:
-      bins: ["curl"]
 ---
 
 # OpenClaw Interaction Bridge 🟥
