@@ -3,7 +3,9 @@
 // - Sends agent state updates directly to snarling (processing/speaking/idle)
 // - Registers approval callback HTTP route for snarling button responses
 
-import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool.js";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { Type } from "@sinclair/typebox";
+import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -77,10 +79,10 @@ async function updateState(status: string, sessionId: string) {
   }
 }
 
-export default {
+export default definePluginEntry({
   id: "openclaw-interaction-bridge",
   name: "OpenClaw Interaction Bridge",
-
+  description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api: any) {
     // State monitoring hooks - track when agent is processing or speaking
     api.on("before_tool_call", (event: any) => {
@@ -94,25 +96,13 @@ export default {
     });
 
     // Register the approval tool
-    // Uses api.registerTool with a plain object (not a factory function)
-    // The execute function receives (toolCallId, params, ctx) where ctx has sessionKey
     api.registerTool({
       name: "request_user_approval",
       description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: {
-            type: "string",
-            description: "The action requiring approval (e.g., 'delete_file', 'send_email')"
-          },
-          message: {
-            type: "string",
-            description: "Human-readable message explaining what needs approval"
-          }
-        },
-        required: ["action", "message"]
-      },
+      parameters: Type.Object({
+        action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
+        message: Type.String({ description: "Human-readable message explaining what needs approval" })
+      }),
       async execute(_toolCallId: string, params: any, ctx: any) {
         const { action, message } = params;
 
@@ -256,4 +246,4 @@ export default {
       console.error("[openclaw-interaction-bridge] Registered /approval-callback route");
     }
   }
-};
+});
