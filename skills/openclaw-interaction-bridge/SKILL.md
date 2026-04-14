@@ -113,10 +113,11 @@ openclaw gateway restart
 To point at something other than the default Snarling ports (e.g., a Tauri app, mobile web view), edit the constants at the top of `index.ts`:
 
 ```typescript
-const SNARLING_URL = "http://localhost:5000/state";       // → your state endpoint
-const APPROVAL_URL = "http://localhost:5001/approval/request"; // → your approval endpoint
-const CALLBACK_URL = "http://localhost:18789/approval-callback"; // → your callback endpoint
+const SNARLING_URL = "http://localhost:5000/state";              // → your state endpoint
+const CALLBACK_BASE_URL = "http://localhost:18789";              // → your callback base URL
 ```
+
+For the approval secret (used to authenticate callback requests), set the `OPENCLAW_APPROVAL_SECRET` environment variable. If not set, a random secret is generated on each startup. When using a custom target, ensure the `secret` query parameter is included in callback URLs.
 
 No config file needed yet — when there are multiple adapters, a config-driven system will make sense. For now, editing the source is simpler and more honest.
 

@@ -6,8 +6,11 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
 import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool";
+import * as crypto from 'crypto';
 
 const SNARLING_URL = "http://localhost:5000/state";
+const CALLBACK_BASE_URL = "http://localhost:18789";
+const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const IDLE_DELAY_MS = 30000; // 30 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
@@ -119,7 +122,12 @@ export default definePluginEntry({
         if (!taskFlow) {
           const taskFlowApi = api.runtime?.taskFlow;
           if (taskFlowApi?.bindSession) {
-            const sessionKey = ctx?.sessionKey || "agent:main:main";
+            const sessionKey = ctx?.sessionKey;
+            if (!sessionKey) {
+              return {
+                content: [{ type: "text", text: "Error: No session context available for approval tool." }]
+              };
+            }
             console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
             taskFlow = taskFlowApi.bindSession({
               sessionKey,
@@ -137,8 +145,16 @@ export default definePluginEntry({
           };
         }
 
+        const sessionKey = ctx?.sessionKey;
+        if (!sessionKey) {
+          return {
+            content: [{ type: "text", text: "Error: No session context available for approval tool." }]
+          };
+        }
+        const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
+
         try {
-          const result = await requestUserApproval({ action, message }, taskFlow);
+          const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
           return {
             content: [{ type: "text", text: result }]
           };
@@ -189,9 +205,25 @@ export default definePluginEntry({
 
           console.error(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
 
-          // Get sessionKey from query string
+          // Parse URL for query parameters
           const url = new URL(req.url || '/', 'http://localhost');
-          const sessionKey = url.searchParams.get('sessionKey') || 'agent:main:main';
+
+          // Verify approval secret to prevent unauthorized callbacks
+          const callbackSecret = url.searchParams.get('secret');
+          if (callbackSecret !== APPROVAL_SECRET) {
+            console.error(`[approval-callback] Invalid secret for request ${request_id}`);
+            res.statusCode = 403;
+            res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
+            return true;
+          }
+
+          // Require sessionKey — no default fallback for security
+          const sessionKey = url.searchParams.get('sessionKey');
+          if (!sessionKey) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
+            return true;
+          }
 
           // Bind TaskFlow to the main session for webhook context
           const taskFlowApi = api.runtime?.taskFlow;

@@ -21,6 +21,12 @@ export interface RequestUserApprovalInput {
   message: string;
 }
 
+export interface ApprovalConfig {
+  callbackUrl: string;
+  approvalSecret: string;
+  sessionKey: string;
+}
+
 /**
  * Check if the current approval lock is stale or orphaned, and clear it if so.
  * Returns true if the lock was cleared.
@@ -76,9 +82,11 @@ export function forceClearApprovalLock(requestId?: string): void {
  */
 export async function requestUserApproval(
   input: RequestUserApprovalInput,
-  taskFlow: any
+  taskFlow: any,
+  config: ApprovalConfig
 ): Promise<string> {
   const { action, message } = input;
+  const { callbackUrl, approvalSecret, sessionKey } = config;
 
   // Check and clear stale/orphaned locks before deciding to block
   clearStaleLock();
@@ -161,7 +169,7 @@ export async function requestUserApproval(
       body: JSON.stringify({
         request_id: requestId,
         message: `${action}: ${message}`,
-        callback_url: `http://localhost:18789/approval-callback?sessionKey=agent:main:main`,
+        callback_url: `${callbackUrl}&secret=${encodeURIComponent(approvalSecret)}`,
         timeout_seconds: 7200,
       }),
     });
