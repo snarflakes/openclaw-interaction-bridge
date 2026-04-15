@@ -169,7 +169,8 @@ export async function requestUserApproval(
       body: JSON.stringify({
         request_id: requestId,
         message: `${action}: ${message}`,
-        callback_url: `${callbackUrl}&secret=${encodeURIComponent(approvalSecret)}`,
+        callback_url: callbackUrl,
+        secret: approvalSecret,
         timeout_seconds: 7200,
       }),
     });
