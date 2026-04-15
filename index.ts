@@ -206,11 +206,14 @@ export default definePluginEntry({
 
           // Parse URL for query parameters
           const url = new URL(req.url || '/', 'http://localhost');
+          console.error(`[approval-callback] req.url=${req.url}`);
+          console.error(`[approval-callback] secret param=${url.searchParams.get('secret')}`);
+          console.error(`[approval-callback] APPROVAL_SECRET=${APPROVAL_SECRET}`);
 
           // Verify approval secret to prevent unauthorized callbacks
           const callbackSecret = url.searchParams.get('secret');
           if (callbackSecret !== APPROVAL_SECRET) {
-            console.error(`[approval-callback] Invalid secret for request ${request_id}`);
+            console.error(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);
             res.statusCode = 403;
             res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
             return true;

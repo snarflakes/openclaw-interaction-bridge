@@ -178,51 +178,11 @@ export async function requestUserApproval(
     console.error(`[approval-tool] Could not notify approval_server: ${_e}`);
   }
 
-  // Poll the TaskFlow until it's resolved (no longer in "waiting" status)
-  // The webhook callback will resume and finish the flow when user presses A/B
-  const POLL_INTERVAL_MS = 2000;  // Check every 2 seconds
-  const MAX_POLL_DURATION_MS = 30 * 60 * 1000;  // 30 minute timeout
-  const pollStart = Date.now();
-
-  console.error(`[approval-tool] Polling TaskFlow ${flowId} for resolution (request: ${requestId})`);
-
-  while (Date.now() - pollStart < MAX_POLL_DURATION_MS) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
-
-    // Check if the approval was resolved (via webhook callback)
-    const entry = pendingApprovals.get(requestId);
-    if (!entry) {
-      // Entry was removed — approval was handled by webhook callback
-      console.error(`[approval-tool] Approval ${requestId} resolved (entry removed from pending)`);
-      // The webhook callback enqueues a system event with the result.
-      // We can also try to check the flow state directly.
-      try {
-        const flowResult = await taskFlow.get(flowId);
-        const flow = flowResult?.flow ?? flowResult;
-        if (flow?.stateJson?.approved != null) {
-          const approved = flow.stateJson.approved === true;
-          const result = approved ? "✅ APPROVED" : "❌ REJECTED";
-          return `${result}: User ${approved ? 'approved' : 'rejected'} the request.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
-        }
-      } catch (_e) {
-        console.error(`[approval-tool] Could not get flow state after resolution: ${_e}`);
-      }
-      // Fallback: return generic resolved message
-      return `Approval request resolved. (Request: ${requestId})\n\nAction: ${action}\nDetails: ${message}`;
-    }
-
-    // Check for staleness (lock held too long)
-    if (currentApprovalInProgress === requestId && Date.now() - (currentApprovalStartedAt ?? entry.createdAt) > APPROVAL_LOCK_TIMEOUT_MS) {
-      pendingApprovals.delete(requestId);
-      forceClearApprovalLock(requestId);
-      return `⏰ Approval request timed out after ${APPROVAL_LOCK_TIMEOUT_MS / 60000} minutes.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
-    }
-  }
-
-  // Max poll duration reached
-  pendingApprovals.delete(requestId);
-  forceClearApprovalLock(requestId);
-  return `⏰ Approval request timed out.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
+  // Return immediately — don't poll!
+  // The webhook callback will resume the TaskFlow and wake the agent session.
+  // The agent will get the result on its next turn via the system event.
+  console.error(`[approval-tool] Approval request sent, waiting for callback (request: ${requestId})`);
+  return `⏳ Waiting for approval via Snarling display.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
 }
 
 /**
