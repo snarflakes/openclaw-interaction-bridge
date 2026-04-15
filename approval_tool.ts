@@ -162,22 +162,20 @@ export async function requestUserApproval(
     throw new Error(`Failed to set approval flow to waiting: ${detail}`);
   }
 
-  // Notify snarling display via approval_server (visual feedback)
+  // Notify snarling display directly (port 5000) - no middleman
   try {
-    await fetch("http://localhost:5001/approval/request", {
+    await fetch("http://localhost:5000/approval/alert", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         request_id: requestId,
         message: `${action}: ${message}`,
-        callback_url: callbackUrl,
         secret: approvalSecret,
         timeout_seconds: 7200,
       }),
     });
   } catch (_e) {
-    // Snarling notification is optional - don't block on it
-    console.error(`[approval-tool] Could not notify approval_server: ${_e}`);
+    console.error(`[approval-tool] Could not notify snarling: ${_e}`);
   }
 
   // Return immediately — don't poll!
