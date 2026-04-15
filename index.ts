@@ -248,7 +248,7 @@ export default definePluginEntry({
 
           // Get system API for waking the agent session
           const systemApi = api.runtime?.system;
-          if (!systemApi?.enqueueSystemEvent || !systemApi?.requestHeartbeatNow) {
+          if (!systemApi?.enqueueSystemEvent) {
             console.error(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
           }
 

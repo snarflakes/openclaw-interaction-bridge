@@ -193,7 +193,7 @@ export async function resumeApprovalFlow(
   requestId: string,
   approved: boolean,
   taskFlowApi: any,
-  systemApi: { enqueueSystemEvent: (text: string, opts: { sessionKey: string }) => void; requestHeartbeatNow: (opts: { reason: string; sessionKey: string }) => void },
+  systemApi: { enqueueSystemEvent: (text: string, opts: { sessionKey: string }) => void; requestHeartbeatNow: (opts: any) => void; runHeartbeatOnce?: (opts: any) => Promise<any> },
   sessionKey: string
 ): Promise<{ success: boolean; message: string }> {
   const entry = pendingApprovals.get(requestId);
@@ -257,21 +257,43 @@ export async function resumeApprovalFlow(
       console.error(`[approval-tool] Warning: could not finish flow ${flowId}: ${finished?.reason || "unknown"}`);
     }
 
-    // No need to enqueue system events or request heartbeat —
-    // the polling tool will detect the flow resolution and return the result directly.
-    // But as a fallback, still try to wake the agent session in case the polling
-    // tool isn't active (e.g., if the tool call timed out).
+    // Wake the agent session immediately using runHeartbeatOnce with hook: reason
+    // This bypasses the coalesce timer and is classified as event-driven,
+    // so heartbeat preflight treats it as a real trigger (not "other").
+    // Falls back to requestHeartbeatNow if runHeartbeatOnce isn't available.
     const approvalResult = approved ? "APPROVED" : "REJECTED";
     try {
       systemApi.enqueueSystemEvent(
         `User approval response: ${approvalResult}. ${approved ? "Proceeding with the action." : "Action cancelled by user."} (request: ${requestId})`,
         { sessionKey }
       );
-      systemApi.requestHeartbeatNow({
-        reason: "approval-callback",
-        sessionKey
-      });
-      console.error(`[approval-tool] Enqueued system event and requested heartbeat for session ${sessionKey}`);
+
+      const wakeReason = "hook:approval";
+      if (systemApi.runHeartbeatOnce) {
+        const wakeResult = await systemApi.runHeartbeatOnce({
+          sessionKey,
+          reason: wakeReason,
+          heartbeat: { target: "last" }
+        });
+        console.error(`[approval-tool] runHeartbeatOnce result: ${JSON.stringify(wakeResult)}`);
+
+        // If skipped because busy, schedule a coalesced retry
+        if (wakeResult?.status === "skipped" && wakeResult?.reason === "requests-in-flight") {
+          systemApi.requestHeartbeatNow?.({
+            sessionKey,
+            reason: wakeReason,
+            coalesceMs: 250
+          });
+          console.error(`[approval-tool] Skipped (busy), scheduled coalesced retry`);
+        }
+      } else {
+        // Fallback for older runtime without runHeartbeatOnce
+        systemApi.requestHeartbeatNow?.({
+          reason: wakeReason,
+          sessionKey
+        });
+        console.error(`[approval-tool] Used requestHeartbeatNow fallback`);
+      }
     } catch (wakeErr) {
       console.error(`[approval-tool] Warning: failed to wake agent session: ${wakeErr}`);
     }
