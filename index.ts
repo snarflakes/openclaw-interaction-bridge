@@ -6,7 +6,6 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
 import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool";
-import * as crypto from 'crypto';
 
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
@@ -98,75 +97,73 @@ export default definePluginEntry({
       updateState("speaking", sessionKey);
     });
 
-    // Register the approval tool
-    api.registerTool({
-      name: "request_user_approval",
-      description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
-      parameters: Type.Object({
-        action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
-        message: Type.String({ description: "Human-readable message explaining what needs approval" })
-      }),
-      async execute(_toolCallId: string, params: any, ctx: any) {
-        const { action, message } = params;
+    // Register the approval tool using factory pattern
+    // Factory receives ctx (OpenClawPluginToolContext) with sessionKey, sessionId, etc.
+    // Plain tool objects only get (_id, params) in execute — no ctx access.
+    api.registerTool((ctx: any) => {
+      const sessionKey = ctx?.sessionKey;
 
-        // Get TaskFlow bound to this tool context
-        // Try fromToolContext first, but it throws if ctx lacks sessionKey
-        // Fall back to bindSession with default sessionKey
-        let taskFlow: any = null;
-        try {
-          taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
-        } catch (e) {
-          console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
-        }
+      return {
+        name: "request_user_approval",
+        description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
+        parameters: Type.Object({
+          action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
+          message: Type.String({ description: "Human-readable message explaining what needs approval" })
+        }),
+        async execute(_toolCallId: string, params: any) {
+          const { action, message } = params;
 
-        if (!taskFlow) {
-          const taskFlowApi = api.runtime?.taskFlow;
-          if (taskFlowApi?.bindSession) {
-            const sessionKey = ctx?.sessionKey;
-            if (!sessionKey) {
-              return {
-                content: [{ type: "text", text: "Error: No session context available for approval tool." }]
-              };
+          if (!sessionKey) {
+            return {
+              content: [{ type: "text", text: "Error: No session context available for approval tool." }]
+            };
+          }
+
+          // Get TaskFlow bound to this tool context
+          let taskFlow: any = null;
+          try {
+            taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
+          } catch (e) {
+            console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+          }
+
+          if (!taskFlow) {
+            const taskFlowApi = api.runtime?.taskFlow;
+            if (taskFlowApi?.bindSession) {
+              console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
+              taskFlow = taskFlowApi.bindSession({
+                sessionKey,
+                requesterOrigin: "openclaw-interaction-bridge/approval-tool"
+              });
             }
-            console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
-            taskFlow = taskFlowApi.bindSession({
-              sessionKey,
-              requesterOrigin: "openclaw-interaction-bridge/approval-tool"
-            });
+          }
+
+          if (!taskFlow) {
+            return {
+              content: [{
+                type: "text",
+                text: "Error: TaskFlow not available. This tool requires an active agent session."
+              }]
+            };
+          }
+
+          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
+
+          try {
+            const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
+            return {
+              content: [{ type: "text", text: result }]
+            };
+          } catch (error) {
+            return {
+              content: [{
+                type: "text",
+                text: `Error requesting approval: ${error instanceof Error ? error.message : String(error)}`
+              }]
+            };
           }
         }
-
-        if (!taskFlow) {
-          return {
-            content: [{
-              type: "text",
-              text: "Error: TaskFlow not available. This tool requires an active agent session."
-            }]
-          };
-        }
-
-        const sessionKey = ctx?.sessionKey;
-        if (!sessionKey) {
-          return {
-            content: [{ type: "text", text: "Error: No session context available for approval tool." }]
-          };
-        }
-        const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
-
-        try {
-          const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
-          return {
-            content: [{ type: "text", text: result }]
-          };
-        } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: `Error requesting approval: ${error instanceof Error ? error.message : String(error)}`
-            }]
-          };
-        }
-      }
+      };
     }, { optional: true });
 
     // Register HTTP route for approval callbacks from snarling
