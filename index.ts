@@ -102,8 +102,6 @@ export default definePluginEntry({
     // Plain tool objects do NOT receive ctx in execute — the 3rd arg is empty/undefined at runtime.
     api.registerTool((ctx: any) => {
       const sessionKey = ctx?.sessionKey;
-      console.error(`[approval-tool] Factory ctx keys: ${ctx ? Object.keys(ctx).join(',') : 'undefined'}`);
-      console.error(`[approval-tool] Factory ctx.sessionKey: ${sessionKey ?? 'undefined'}`);
 
       return {
         name: "request_user_approval",
@@ -195,8 +193,6 @@ export default definePluginEntry({
           }
 
           const { request_id, approved, secret } = body;
-          console.error(`[approval-callback] FULL BODY: ${JSON.stringify(body)}`);
-          console.error(`[approval-callback] body keys: ${Object.keys(body).join(',')}`);
 
           if (!request_id) {
             res.statusCode = 400;
@@ -208,11 +204,8 @@ export default definePluginEntry({
 
           // Parse URL for sessionKey query param
           const url = new URL(req.url || '/', 'http://localhost');
-          console.error(`[approval-callback] req.url=${req.url}`);
-          console.error(`[approval-callback] body secret=${secret}`);
-          console.error(`[approval-callback] APPROVAL_SECRET=${APPROVAL_SECRET}`);
 
-          // Verify approval secret from request body (not query params — gateway strips them)
+          // Verify approval secret from request body
           const callbackSecret = secret;
           if (callbackSecret !== APPROVAL_SECRET) {
             console.error(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);

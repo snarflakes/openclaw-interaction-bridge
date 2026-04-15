@@ -87,7 +87,6 @@ export async function requestUserApproval(
 ): Promise<string> {
   const { action, message } = input;
   const { callbackUrl, approvalSecret, sessionKey } = config;
-  console.error(`[approval-tool] config: callbackUrl=${callbackUrl}, approvalSecret=${approvalSecret}, sessionKey=${sessionKey}`);
 
   // Check and clear stale/orphaned locks before deciding to block
   clearStaleLock();
