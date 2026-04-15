@@ -97,73 +97,75 @@ export default definePluginEntry({
       updateState("speaking", sessionKey);
     });
 
-    // Register the approval tool using factory pattern
-    // Factory receives ctx (OpenClawPluginToolContext) with sessionKey, sessionId, etc.
-    // Plain tool objects only get (_id, params) in execute — no ctx access.
-    api.registerTool((ctx: any) => {
-      const sessionKey = ctx?.sessionKey;
+    // Register the approval tool
+    // The execute function receives (toolCallId, params, ctx) where ctx has sessionKey
+    api.registerTool({
+      name: "request_user_approval",
+      description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
+      parameters: Type.Object({
+        action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
+        message: Type.String({ description: "Human-readable message explaining what needs approval" })
+      }),
+      async execute(_toolCallId: string, params: any, ctx: any) {
+        const { action, message } = params;
 
-      return {
-        name: "request_user_approval",
-        description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
-        parameters: Type.Object({
-          action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
-          message: Type.String({ description: "Human-readable message explaining what needs approval" })
-        }),
-        async execute(_toolCallId: string, params: any) {
-          const { action, message } = params;
+        // Debug: log what we get in ctx
+        console.error(`[approval-tool] ctx keys: ${ctx ? Object.keys(ctx).join(',') : 'undefined'}`);
+        console.error(`[approval-tool] ctx.sessionKey: ${ctx?.sessionKey ?? 'undefined'}`);
+        console.error(`[approval-tool] ctx.sessionId: ${ctx?.sessionId ?? 'undefined'}`);
 
-          if (!sessionKey) {
-            return {
-              content: [{ type: "text", text: "Error: No session context available for approval tool." }]
-            };
-          }
+        // Get sessionKey from ctx (no hardcoded fallbacks)
+        const sessionKey = ctx?.sessionKey;
+        if (!sessionKey) {
+          return {
+            content: [{ type: "text", text: `Error: No sessionKey in tool context. Available ctx keys: ${ctx ? Object.keys(ctx).join(', ') : 'none'}` }]
+          };
+        }
 
-          // Get TaskFlow bound to this tool context
-          let taskFlow: any = null;
-          try {
-            taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
-          } catch (e) {
-            console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
-          }
+        // Get TaskFlow bound to this tool context
+        let taskFlow: any = null;
+        try {
+          taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
+        } catch (e) {
+          console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+        }
 
-          if (!taskFlow) {
-            const taskFlowApi = api.runtime?.taskFlow;
-            if (taskFlowApi?.bindSession) {
-              console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
-              taskFlow = taskFlowApi.bindSession({
-                sessionKey,
-                requesterOrigin: "openclaw-interaction-bridge/approval-tool"
-              });
-            }
-          }
-
-          if (!taskFlow) {
-            return {
-              content: [{
-                type: "text",
-                text: "Error: TaskFlow not available. This tool requires an active agent session."
-              }]
-            };
-          }
-
-          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
-
-          try {
-            const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
-            return {
-              content: [{ type: "text", text: result }]
-            };
-          } catch (error) {
-            return {
-              content: [{
-                type: "text",
-                text: `Error requesting approval: ${error instanceof Error ? error.message : String(error)}`
-              }]
-            };
+        if (!taskFlow) {
+          const taskFlowApi = api.runtime?.taskFlow;
+          if (taskFlowApi?.bindSession) {
+            console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
+            taskFlow = taskFlowApi.bindSession({
+              sessionKey,
+              requesterOrigin: "openclaw-interaction-bridge/approval-tool"
+            });
           }
         }
-      };
+
+        if (!taskFlow) {
+          return {
+            content: [{
+              type: "text",
+              text: "Error: TaskFlow not available. This tool requires an active agent session."
+            }]
+          };
+        }
+
+        const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
+
+        try {
+          const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
+          return {
+            content: [{ type: "text", text: result }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error requesting approval: ${error instanceof Error ? error.message : String(error)}`
+            }]
+          };
+        }
+      }
     }, { optional: true });
 
     // Register HTTP route for approval callbacks from snarling
