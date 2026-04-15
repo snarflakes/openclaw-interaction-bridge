@@ -11,7 +11,7 @@ const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
 const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
-const IDLE_DELAY_MS = 30000; // 30 seconds of no activity = go idle
+const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
 
 // Track if HTTP route is registered (only register once)
@@ -95,6 +95,17 @@ export default definePluginEntry({
     api.on("before_agent_reply", (event: any) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("speaking", sessionKey);
+    });
+
+    api.on("agent_end", (event: any) => {
+      // Agent finished its turn — go idle immediately
+      lastState = "";
+      void fetch(SNARLING_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "sleeping", timestamp: Date.now() })
+      });
+      if (idleTimeout) { clearTimeout(idleTimeout); idleTimeout = null; }
     });
 
     // Register the approval tool using factory pattern
