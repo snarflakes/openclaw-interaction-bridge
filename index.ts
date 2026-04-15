@@ -195,6 +195,8 @@ export default definePluginEntry({
           }
 
           const { request_id, approved, secret } = body;
+          console.error(`[approval-callback] FULL BODY: ${JSON.stringify(body)}`);
+          console.error(`[approval-callback] body keys: ${Object.keys(body).join(',')}`);
 
           if (!request_id) {
             res.statusCode = 400;
