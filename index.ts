@@ -213,9 +213,6 @@ export default definePluginEntry({
 
           console.error(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
 
-          // Parse URL for sessionKey query param
-          const url = new URL(req.url || '/', 'http://localhost');
-
           // Verify approval secret from request body
           const callbackSecret = secret;
           if (callbackSecret !== APPROVAL_SECRET) {
@@ -225,13 +222,16 @@ export default definePluginEntry({
             return true;
           }
 
-          // Require sessionKey — no default fallback for security
-          const sessionKey = url.searchParams.get('sessionKey');
+          // Try sessionKey from body first (gateway strips query params), then URL params
+          const bodySessionKey = body.sessionKey;
+          const url = new URL(req.url || '/', 'http://localhost');
+          const sessionKey = bodySessionKey || url.searchParams.get('sessionKey');
           if (!sessionKey) {
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
             return true;
           }
+          console.error(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
 
           // Bind TaskFlow to the main session for webhook context
           const taskFlowApi = api.runtime?.taskFlow;
@@ -248,6 +248,9 @@ export default definePluginEntry({
 
           // Get system API for waking the agent session
           const systemApi = api.runtime?.system;
+          const diagLine = `[${new Date().toISOString()}] systemApi: ${!!systemApi}, enqueueSystemEvent: ${!!systemApi?.enqueueSystemEvent}, requestHeartbeatNow: ${!!systemApi?.requestHeartbeatNow}, runHeartbeatOnce: ${!!systemApi?.runHeartbeatOnce}`;
+          console.error(`[approval-callback] ${diagLine}`);
+          try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', diagLine + '\n'); } catch(_e) {}
           if (!systemApi?.enqueueSystemEvent) {
             console.error(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
           }
@@ -257,7 +260,9 @@ export default definePluginEntry({
               request_id,
               approved === true,
               boundTaskFlow,
-              systemApi ?? { enqueueSystemEvent: () => {}, requestHeartbeatNow: () => {} },
+              // Pass minimal systemApi — just enqueueSystemEvent
+              // Wake will happen AFTER HTTP response is sent
+              { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {}), requestHeartbeatNow: () => {}, runHeartbeatOnce: undefined },
               sessionKey
             );
 
@@ -265,6 +270,7 @@ export default definePluginEntry({
             // even if resumeApprovalFlow had partial failures
             forceClearApprovalLock(request_id);
 
+            // Send HTTP response FIRST — must fully flush before attempting wake
             if (result.success) {
               res.statusCode = 200;
               res.end(JSON.stringify({ status: "success", request_id, approved, message: result.message }));
@@ -272,6 +278,48 @@ export default definePluginEntry({
               res.statusCode = 404;
               res.end(JSON.stringify({ error: result.message, request_id }));
             }
+
+            // Schedule wake on NEXT event loop tick to ensure HTTP response is fully flushed
+            // and the session lane is no longer considered "in-flight"
+            setImmediate(() => {
+              try {
+                const wakeReason = "hook:approval";
+                if (systemApi?.requestHeartbeatNow) {
+                  systemApi.requestHeartbeatNow({
+                    reason: wakeReason,
+                    sessionKey,
+                    coalesceMs: 100
+                  });
+                  try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Post-response requestHeartbeatNow called (setImmediate)\n`); } catch(_e) {}
+                }
+                if (systemApi?.runHeartbeatOnce) {
+                  systemApi.runHeartbeatOnce({
+                    sessionKey,
+                    reason: wakeReason,
+                    heartbeat: { target: "last" }
+                  })
+                    .then((r: any) => {
+                      try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Post-response runHeartbeatOnce result: ${JSON.stringify(r)}\n`); } catch(_e) {}
+                    })
+                    .catch((e: any) => {
+                      try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Post-response runHeartbeatOnce error: ${e}\n`); } catch(_e) {}
+                    });
+                }
+                // Second wake attempt after a short delay in case the first was still "in-flight"
+                setTimeout(() => {
+                  try {
+                    systemApi.requestHeartbeatNow?.({
+                      reason: wakeReason,
+                      sessionKey,
+                      coalesceMs: 0
+                    });
+                    try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Delayed requestHeartbeatNow (500ms)\n`); } catch(_e) {}
+                  } catch(_e) {}
+                }, 500);
+              } catch (wakeErr) {
+                try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Wake error: ${wakeErr}\n`); } catch(_e) {}
+              }
+            });
           } catch (error) {
             console.error(`[approval-callback] Error: ${error}`);
             // Even on exception, clear the lock so it doesn't get stuck

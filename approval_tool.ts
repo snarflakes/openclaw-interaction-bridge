@@ -162,6 +162,7 @@ export async function requestUserApproval(
   }
 
   // Notify snarling display directly (port 5000) - no middleman
+  // Include sessionKey so snarling can pass it back in the callback URL
   try {
     await fetch("http://localhost:5000/approval/alert", {
       method: "POST",
@@ -170,6 +171,7 @@ export async function requestUserApproval(
         request_id: requestId,
         message: `${action}: ${message}`,
         secret: approvalSecret,
+        sessionKey,
         timeout_seconds: 7200,
       }),
     });
@@ -177,9 +179,11 @@ export async function requestUserApproval(
     console.error(`[approval-tool] Could not notify snarling: ${_e}`);
   }
 
-  // Return immediately — don't poll!
-  // The webhook callback will resume the TaskFlow and wake the agent session.
-  // The agent will get the result on its next turn via the system event.
+  // Return immediately — the webhook callback will resume the TaskFlow and
+  // enqueue a system event with the approval result. The agent sees the
+  // result as a system message on its next turn (triggered by the wake).
+  // Note: The tool must return immediately because blocking/polling causes
+  // session context corruption ("missing tool result" errors).
   console.error(`[approval-tool] Approval request sent, waiting for callback (request: ${requestId})`);
   return `⏳ Waiting for approval via Snarling display.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
 }
@@ -257,45 +261,16 @@ export async function resumeApprovalFlow(
       console.error(`[approval-tool] Warning: could not finish flow ${flowId}: ${finished?.reason || "unknown"}`);
     }
 
-    // Wake the agent session immediately using runHeartbeatOnce with hook: reason
-    // This bypasses the coalesce timer and is classified as event-driven,
-    // so heartbeat preflight treats it as a real trigger (not "other").
-    // Falls back to requestHeartbeatNow if runHeartbeatOnce isn't available.
+    // Enqueue system event so the agent sees the approval on its next turn
+    // Wake is now handled by the callback handler AFTER the HTTP response is sent
     const approvalResult = approved ? "APPROVED" : "REJECTED";
     try {
       systemApi.enqueueSystemEvent(
         `User approval response: ${approvalResult}. ${approved ? "Proceeding with the action." : "Action cancelled by user."} (request: ${requestId})`,
         { sessionKey }
       );
-
-      const wakeReason = "hook:approval";
-      if (systemApi.runHeartbeatOnce) {
-        const wakeResult = await systemApi.runHeartbeatOnce({
-          sessionKey,
-          reason: wakeReason,
-          heartbeat: { target: "last" }
-        });
-        console.error(`[approval-tool] runHeartbeatOnce result: ${JSON.stringify(wakeResult)}`);
-
-        // If skipped because busy, schedule a coalesced retry
-        if (wakeResult?.status === "skipped" && wakeResult?.reason === "requests-in-flight") {
-          systemApi.requestHeartbeatNow?.({
-            sessionKey,
-            reason: wakeReason,
-            coalesceMs: 250
-          });
-          console.error(`[approval-tool] Skipped (busy), scheduled coalesced retry`);
-        }
-      } else {
-        // Fallback for older runtime without runHeartbeatOnce
-        systemApi.requestHeartbeatNow?.({
-          reason: wakeReason,
-          sessionKey
-        });
-        console.error(`[approval-tool] Used requestHeartbeatNow fallback`);
-      }
     } catch (wakeErr) {
-      console.error(`[approval-tool] Warning: failed to wake agent session: ${wakeErr}`);
+      console.error(`[approval-tool] Warning: failed to enqueue system event: ${wakeErr}`);
     }
 
     return { success: true, message: `Approval ${approved ? "APPROVED" : "REJECTED"} for ${requestId}` };
