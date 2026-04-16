@@ -21,6 +21,21 @@ export interface RequestUserApprovalInput {
   message: string;
 }
 
+export interface ApprovalConfig {
+  callbackUrl: string;
+  approvalSecret: string;
+  sessionKey: string;
+}
+
+// Plugin-side approval statistics
+export const approvalStats = {
+  requested: 0,
+  approved: 0,
+  rejected: 0,
+  timedOut: 0,
+  errored: 0,
+};
+
 /**
  * Check if the current approval lock is stale or orphaned, and clear it if so.
  * Returns true if the lock was cleared.
@@ -41,6 +56,7 @@ function clearStaleLock(): boolean {
   const elapsed = Date.now() - (currentApprovalStartedAt ?? entry.createdAt);
   if (elapsed > APPROVAL_LOCK_TIMEOUT_MS) {
     console.error(`[approval-tool] Clearing stale lock: ${currentApprovalInProgress} (held for ${Math.round(elapsed / 60000)}min, timeout=${APPROVAL_LOCK_TIMEOUT_MS / 60000}min)`);
+    approvalStats.timedOut++;
     pendingApprovals.delete(currentApprovalInProgress);
     currentApprovalInProgress = null;
     currentApprovalStartedAt = null;
@@ -76,9 +92,11 @@ export function forceClearApprovalLock(requestId?: string): void {
  */
 export async function requestUserApproval(
   input: RequestUserApprovalInput,
-  taskFlow: any
+  taskFlow: any,
+  config: ApprovalConfig
 ): Promise<string> {
   const { action, message } = input;
+  const { callbackUrl, approvalSecret, sessionKey } = config;
 
   // Check and clear stale/orphaned locks before deciding to block
   clearStaleLock();
@@ -153,68 +171,34 @@ export async function requestUserApproval(
     throw new Error(`Failed to set approval flow to waiting: ${detail}`);
   }
 
-  // Notify snarling display via approval_server (visual feedback)
+  approvalStats.requested++;
+
+  // Notify snarling display directly (port 5000) - no middleman
+  // Include sessionKey so snarling can pass it back in the callback URL
   try {
-    await fetch("http://localhost:5001/approval/request", {
+    await fetch("http://localhost:5000/approval/alert", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         request_id: requestId,
         message: `${action}: ${message}`,
-        callback_url: `http://localhost:18789/approval-callback?sessionKey=agent:main:main`,
+        secret: approvalSecret,
+        sessionKey,
         timeout_seconds: 7200,
       }),
     });
   } catch (_e) {
-    // Snarling notification is optional - don't block on it
-    console.error(`[approval-tool] Could not notify approval_server: ${_e}`);
+    console.error(`[approval-tool] Could not notify snarling: ${_e}`);
+    approvalStats.errored++;
   }
 
-  // Poll the TaskFlow until it's resolved (no longer in "waiting" status)
-  // The webhook callback will resume and finish the flow when user presses A/B
-  const POLL_INTERVAL_MS = 2000;  // Check every 2 seconds
-  const MAX_POLL_DURATION_MS = 30 * 60 * 1000;  // 30 minute timeout
-  const pollStart = Date.now();
-
-  console.error(`[approval-tool] Polling TaskFlow ${flowId} for resolution (request: ${requestId})`);
-
-  while (Date.now() - pollStart < MAX_POLL_DURATION_MS) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
-
-    // Check if the approval was resolved (via webhook callback)
-    const entry = pendingApprovals.get(requestId);
-    if (!entry) {
-      // Entry was removed — approval was handled by webhook callback
-      console.error(`[approval-tool] Approval ${requestId} resolved (entry removed from pending)`);
-      // The webhook callback enqueues a system event with the result.
-      // We can also try to check the flow state directly.
-      try {
-        const flowResult = await taskFlow.get(flowId);
-        const flow = flowResult?.flow ?? flowResult;
-        if (flow?.stateJson?.approved != null) {
-          const approved = flow.stateJson.approved === true;
-          const result = approved ? "✅ APPROVED" : "❌ REJECTED";
-          return `${result}: User ${approved ? 'approved' : 'rejected'} the request.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
-        }
-      } catch (_e) {
-        console.error(`[approval-tool] Could not get flow state after resolution: ${_e}`);
-      }
-      // Fallback: return generic resolved message
-      return `Approval request resolved. (Request: ${requestId})\n\nAction: ${action}\nDetails: ${message}`;
-    }
-
-    // Check for staleness (lock held too long)
-    if (currentApprovalInProgress === requestId && Date.now() - (currentApprovalStartedAt ?? entry.createdAt) > APPROVAL_LOCK_TIMEOUT_MS) {
-      pendingApprovals.delete(requestId);
-      forceClearApprovalLock(requestId);
-      return `⏰ Approval request timed out after ${APPROVAL_LOCK_TIMEOUT_MS / 60000} minutes.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
-    }
-  }
-
-  // Max poll duration reached
-  pendingApprovals.delete(requestId);
-  forceClearApprovalLock(requestId);
-  return `⏰ Approval request timed out.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
+  // Return immediately — the webhook callback will resume the TaskFlow and
+  // enqueue a system event with the approval result. The agent sees the
+  // result as a system message on its next turn (triggered by the wake).
+  // Note: The tool must return immediately because blocking/polling causes
+  // session context corruption ("missing tool result" errors).
+  console.error(`[approval-tool] Approval request sent, waiting for callback (request: ${requestId})`);
+  return `⏳ Waiting for approval via Snarling display.\n\nAction: ${action}\nDetails: ${message}\nRequest: ${requestId}`;
 }
 
 /**
@@ -226,7 +210,7 @@ export async function resumeApprovalFlow(
   requestId: string,
   approved: boolean,
   taskFlowApi: any,
-  systemApi: { enqueueSystemEvent: (text: string, opts: { sessionKey: string }) => void; requestHeartbeatNow: (opts: { reason: string; sessionKey: string }) => void },
+  systemApi: { enqueueSystemEvent: (text: string, opts: { sessionKey: string }) => void; requestHeartbeatNow: (opts: any) => void; runHeartbeatOnce?: (opts: any) => Promise<any> },
   sessionKey: string
 ): Promise<{ success: boolean; message: string }> {
   const entry = pendingApprovals.get(requestId);
@@ -290,23 +274,17 @@ export async function resumeApprovalFlow(
       console.error(`[approval-tool] Warning: could not finish flow ${flowId}: ${finished?.reason || "unknown"}`);
     }
 
-    // No need to enqueue system events or request heartbeat —
-    // the polling tool will detect the flow resolution and return the result directly.
-    // But as a fallback, still try to wake the agent session in case the polling
-    // tool isn't active (e.g., if the tool call timed out).
+    // Enqueue system event so the agent sees the approval on its next turn
+    // Wake is now handled by the callback handler AFTER the HTTP response is sent
     const approvalResult = approved ? "APPROVED" : "REJECTED";
+    if (approved) { approvalStats.approved++; } else { approvalStats.rejected++; }
     try {
       systemApi.enqueueSystemEvent(
         `User approval response: ${approvalResult}. ${approved ? "Proceeding with the action." : "Action cancelled by user."} (request: ${requestId})`,
         { sessionKey }
       );
-      systemApi.requestHeartbeatNow({
-        reason: "approval-callback",
-        sessionKey
-      });
-      console.error(`[approval-tool] Enqueued system event and requested heartbeat for session ${sessionKey}`);
     } catch (wakeErr) {
-      console.error(`[approval-tool] Warning: failed to wake agent session: ${wakeErr}`);
+      console.error(`[approval-tool] Warning: failed to enqueue system event: ${wakeErr}`);
     }
 
     return { success: true, message: `Approval ${approved ? "APPROVED" : "REJECTED"} for ${requestId}` };

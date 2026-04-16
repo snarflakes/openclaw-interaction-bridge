@@ -2,14 +2,17 @@
 // OpenClaw Interaction Bridge Plugin
 // - Sends agent state updates directly to snarling (processing/speaking/idle)
 // - Registers approval callback HTTP route for snarling button responses
+// - Exposes /approval-callback and /approval/stats HTTP endpoints
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
-import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool";
+import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock, approvalStats } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
+const CALLBACK_BASE_URL = "http://localhost:18789";
+const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
-const IDLE_DELAY_MS = 30000; // 30 seconds of no activity = go idle
+const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
 
 // Track if HTTP route is registered (only register once)
@@ -95,66 +98,87 @@ export default definePluginEntry({
       updateState("speaking", sessionKey);
     });
 
-    // Register the approval tool
-    api.registerTool({
-      name: "request_user_approval",
-      description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
-      parameters: Type.Object({
-        action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
-        message: Type.String({ description: "Human-readable message explaining what needs approval" })
-      }),
-      async execute(_toolCallId: string, params: any, ctx: any) {
-        const { action, message } = params;
+    api.on("agent_end", (event: any) => {
+      // Agent finished its turn — go idle immediately
+      lastState = "";
+      void fetch(SNARLING_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "sleeping", timestamp: Date.now() })
+      });
+      if (idleTimeout) { clearTimeout(idleTimeout); idleTimeout = null; }
+    });
 
-        // Get TaskFlow bound to this tool context
-        // Try fromToolContext first, but it throws if ctx lacks sessionKey
-        // Fall back to bindSession with default sessionKey
-        let taskFlow: any = null;
-        try {
-          taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
-        } catch (e) {
-          console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
-        }
+    // Register the approval tool using factory pattern
+    // The factory function receives (ctx: OpenClawPluginToolContext) with sessionKey, sessionId, etc.
+    // Plain tool objects do NOT receive ctx in execute — the 3rd arg is empty/undefined at runtime.
+    api.registerTool((ctx: any) => {
+      const sessionKey = ctx?.sessionKey;
 
-        if (!taskFlow) {
-          const taskFlowApi = api.runtime?.taskFlow;
-          if (taskFlowApi?.bindSession) {
-            const sessionKey = ctx?.sessionKey || "agent:main:main";
-            console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
-            taskFlow = taskFlowApi.bindSession({
-              sessionKey,
-              requesterOrigin: "openclaw-interaction-bridge/approval-tool"
-            });
+      return {
+        name: "request_user_approval",
+        description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
+        parameters: Type.Object({
+          action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
+          message: Type.String({ description: "Human-readable message explaining what needs approval" })
+        }),
+        async execute(_toolCallId: string, params: any) {
+          const { action, message } = params;
+
+          if (!sessionKey) {
+            return {
+              content: [{ type: "text", text: "Error: No sessionKey in tool context." }]
+            };
+          }
+
+          // Get TaskFlow bound to this tool context
+          let taskFlow: any = null;
+          try {
+            taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
+          } catch (e) {
+            console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+          }
+
+          if (!taskFlow) {
+            const taskFlowApi = api.runtime?.taskFlow;
+            if (taskFlowApi?.bindSession) {
+              console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
+              taskFlow = taskFlowApi.bindSession({
+                sessionKey,
+                requesterOrigin: "openclaw-interaction-bridge/approval-tool"
+              });
+            }
+          }
+
+          if (!taskFlow) {
+            return {
+              content: [{
+                type: "text",
+                text: "Error: TaskFlow not available. This tool requires an active agent session."
+              }]
+            };
+          }
+
+          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
+
+          try {
+            const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
+            return {
+              content: [{ type: "text", text: result }]
+            };
+          } catch (error) {
+            return {
+              content: [{
+                type: "text",
+                text: `Error requesting approval: ${error instanceof Error ? error.message : String(error)}`
+              }]
+            };
           }
         }
-
-        if (!taskFlow) {
-          return {
-            content: [{
-              type: "text",
-              text: "Error: TaskFlow not available. This tool requires an active agent session."
-            }]
-          };
-        }
-
-        try {
-          const result = await requestUserApproval({ action, message }, taskFlow);
-          return {
-            content: [{ type: "text", text: result }]
-          };
-        } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: `Error requesting approval: ${error instanceof Error ? error.message : String(error)}`
-            }]
-          };
-        }
-      }
+      };
     }, { optional: true });
 
-    // Register HTTP route for approval callbacks from snarling
-    // When user presses A/B on snarling, the approval_server forwards here
+    // Register approval callback route (exact match)
     if (api.registerHttpRoute && !routeRegistered) {
       routeRegistered = true;
 
@@ -165,7 +189,7 @@ export default definePluginEntry({
         match: "exact",
         replaceExisting: true,
         handler: async (req: any, res: any) => {
-          // Parse body from raw request
+          // Parse body from raw request first (needed for both stats and callback)
           let body: any = {};
           try {
             const chunks: Buffer[] = [];
@@ -179,7 +203,14 @@ export default definePluginEntry({
             return true;
           }
 
-          const { request_id, approved } = body;
+          // Stats request: send {"action":"stats"} to /approval-callback
+          if (body.action === 'stats') {
+            res.statusCode = 200;
+            res.end(JSON.stringify({ stats: approvalStats }));
+            return true;
+          }
+
+          const { request_id, approved, secret } = body;
 
           if (!request_id) {
             res.statusCode = 400;
@@ -189,9 +220,24 @@ export default definePluginEntry({
 
           console.error(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
 
-          // Get sessionKey from query string
-          const url = new URL(req.url || '/', 'http://localhost');
-          const sessionKey = url.searchParams.get('sessionKey') || 'agent:main:main';
+          // Verify approval secret from request body
+          const callbackSecret = secret;
+          if (callbackSecret !== APPROVAL_SECRET) {
+            console.error(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);
+            res.statusCode = 403;
+            res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
+            return true;
+          }
+
+          // Try sessionKey from body first (gateway strips query params), then URL params
+          const bodySessionKey = body.sessionKey;
+          const sessionKey = bodySessionKey || url.searchParams.get('sessionKey');
+          if (!sessionKey) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
+            return true;
+          }
+          console.error(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
 
           // Bind TaskFlow to the main session for webhook context
           const taskFlowApi = api.runtime?.taskFlow;
@@ -208,7 +254,7 @@ export default definePluginEntry({
 
           // Get system API for waking the agent session
           const systemApi = api.runtime?.system;
-          if (!systemApi?.enqueueSystemEvent || !systemApi?.requestHeartbeatNow) {
+          if (!systemApi?.enqueueSystemEvent) {
             console.error(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
           }
 
@@ -217,14 +263,16 @@ export default definePluginEntry({
               request_id,
               approved === true,
               boundTaskFlow,
-              systemApi ?? { enqueueSystemEvent: () => {}, requestHeartbeatNow: () => {} },
+              // Pass minimal systemApi — just enqueueSystemEvent
+              // Wake will happen AFTER HTTP response is sent
+              { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {}), requestHeartbeatNow: () => {}, runHeartbeatOnce: undefined },
               sessionKey
             );
 
-            // Safety net: always clear the lock after handling a callback,
-            // even if resumeApprovalFlow had partial failures
+            // Safety net: always clear the lock after handling a callback
             forceClearApprovalLock(request_id);
 
+            // Send HTTP response FIRST — must fully flush before attempting wake
             if (result.success) {
               res.statusCode = 200;
               res.end(JSON.stringify({ status: "success", request_id, approved, message: result.message }));
@@ -232,9 +280,42 @@ export default definePluginEntry({
               res.statusCode = 404;
               res.end(JSON.stringify({ error: result.message, request_id }));
             }
+
+            // Schedule wake on NEXT event loop tick to ensure HTTP response is fully flushed
+            // and the session lane is no longer considered "in-flight"
+            setImmediate(() => {
+              try {
+                const wakeReason = "hook:approval";
+                if (systemApi?.requestHeartbeatNow) {
+                  systemApi.requestHeartbeatNow({
+                    reason: wakeReason,
+                    sessionKey,
+                    coalesceMs: 100
+                  });
+                }
+                if (systemApi?.runHeartbeatOnce) {
+                  systemApi.runHeartbeatOnce({
+                    sessionKey,
+                    reason: wakeReason,
+                    heartbeat: { target: "last" }
+                  }).catch(() => {});
+                }
+                // Second wake attempt after a short delay
+                setTimeout(() => {
+                  try {
+                    systemApi.requestHeartbeatNow?.({
+                      reason: wakeReason,
+                      sessionKey,
+                      coalesceMs: 0
+                    });
+                  } catch (_e) {}
+                }, 500);
+              } catch (_wakeErr) {
+                // Wake best-effort
+              }
+            });
           } catch (error) {
             console.error(`[approval-callback] Error: ${error}`);
-            // Even on exception, clear the lock so it doesn't get stuck
             forceClearApprovalLock(request_id);
             res.statusCode = 500;
             res.end(JSON.stringify({ error: "Failed to resume TaskFlow", details: String(error), request_id }));
@@ -243,7 +324,7 @@ export default definePluginEntry({
         }
       });
 
-      console.error("[openclaw-interaction-bridge] Registered /approval-callback route");
+      console.error("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
     }
   }
 });
