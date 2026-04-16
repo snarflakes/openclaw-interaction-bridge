@@ -90,7 +90,7 @@ request_user_approval({
 ### Prerequisites
 
 - Raspberry Pi with DisplayHAT Mini
-- [Snarling](https://github.com/snarflakes/snarling) running (state server on port 5000, approval server on port 5001)
+- [Snarling](https://github.com/snarflakes/snarling) running (state + approval server on port 5000)
 - OpenClaw gateway >= 2026.3.24-beta.2
 
 ### Install
@@ -117,7 +117,7 @@ const SNARLING_URL = "http://localhost:5000/state";              // → your sta
 const CALLBACK_BASE_URL = "http://localhost:18789";              // → your callback base URL
 ```
 
-For the approval secret (used to authenticate callback requests), set the `OPENCLAW_APPROVAL_SECRET` environment variable. If not set, a random secret is generated on each startup. When using a custom target, ensure the `secret` query parameter is included in callback URLs.
+For the approval secret (used to authenticate callback requests), set the `OPENCLAW_APPROVAL_SECRET` environment variable. If not set, a random UUID secret is generated on each startup. The secret must be included in the JSON body of callback requests (not query params — the gateway strips those).
 
 No config file needed yet — when there are multiple adapters, a config-driven system will make sense. For now, editing the source is simpler and more honest.
 
@@ -125,20 +125,47 @@ No config file needed yet — when there are multiple adapters, a config-driven 
 
 ```
 OpenClaw Agent
-      ↓ (plugin hooks: before_tool_call, before_agent_reply)
+      ↓ (plugin hooks: before_tool_call, before_agent_reply, agent_end)
 Interaction Bridge Plugin
       ↓ (POST localhost:5000/state)            ← state updates
-      ↓ (POST localhost:5001/approval/request)  ← approval requests
+      ↓ (POST localhost:5000/approval/alert)     ← approval requests (direct, no middleman)
       ↑ (POST localhost:18789/approval-callback) ← approval responses
-Snarling Display (Python services on ports 5000/5001)
+Snarling Display (Python service on port 5000)
 ```
+
+No approval_server middleman — the plugin talks directly to Snarling on port 5000. Snarling resolves the approval via its A/B buttons and POSTs the result back to the gateway's `/approval-callback` route. Wake uses WebSocket RPC (bypasses gateway's `requests-in-flight` check).
+
+## Approval Tracker
+
+The plugin tracks approval lifecycle counts in memory:
+
+| Counter | When it increments |
+|---|---|
+| `requested` | Every time `request_user_approval` is called |
+| `approved` | Callback resolved as approved |
+| `rejected` | Callback resolved as rejected |
+| `timedOut` | Stale lock cleared after 30min timeout |
+| `errored` | Snarling notification POST failed |
+
+Query the stats:
+```bash
+curl -s -X POST http://localhost:18789/approval-callback \
+  -H "Authorization: Bearer <gateway-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"stats"}'
+```
+
+Returns: `{"stats":{"requested":0,"approved":0,"rejected":0,"timedOut":0,"errored":0}}`
+
+Stats are in-memory only — they reset on gateway restart.
 
 ## Troubleshooting
 
-- **Display not updating**: Check that Snarling's state server is running on port 5000 (`curl -s http://localhost:5000/state`)
-- **Approvals not working**: Verify the approval server is on port 5001 and the callback route is accessible
+- **Display not updating**: Check that Snarling is running on port 5000 (`curl -s http://localhost:5000/state`)
+- **Approvals not working**: Verify Snarling is running and the callback route is accessible; check gateway logs for `[approval-callback]` entries
 - **Stuck approval lock**: Wait 30 minutes for the stale timeout, or restart the gateway
 - **Plugin not loading**: Check `openclaw gateway restart` logs for errors; verify `npm install` completed
+- **Stats endpoint not found**: The gateway only allows one HTTP route per plugin — stats is accessed via the same `/approval-callback` route with `{"action":"stats"}` in the body
 
 ## Install from ClawHub
 
