@@ -2,10 +2,11 @@
 // OpenClaw Interaction Bridge Plugin
 // - Sends agent state updates directly to snarling (processing/speaking/idle)
 // - Registers approval callback HTTP route for snarling button responses
+// - Exposes /approval-callback and /approval/stats HTTP endpoints
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
-import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock } from "./approval_tool";
+import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock, approvalStats } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
@@ -177,8 +178,7 @@ export default definePluginEntry({
       };
     }, { optional: true });
 
-    // Register HTTP route for approval callbacks from snarling
-    // When user presses A/B on snarling, the approval_server forwards here
+    // Register approval callback route (exact match)
     if (api.registerHttpRoute && !routeRegistered) {
       routeRegistered = true;
 
@@ -189,7 +189,7 @@ export default definePluginEntry({
         match: "exact",
         replaceExisting: true,
         handler: async (req: any, res: any) => {
-          // Parse body from raw request
+          // Parse body from raw request first (needed for both stats and callback)
           let body: any = {};
           try {
             const chunks: Buffer[] = [];
@@ -200,6 +200,13 @@ export default definePluginEntry({
             console.error(`[approval-callback] Failed to parse body: ${_e}`);
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return true;
+          }
+
+          // Stats request: send {"action":"stats"} to /approval-callback
+          if (body.action === 'stats') {
+            res.statusCode = 200;
+            res.end(JSON.stringify({ stats: approvalStats }));
             return true;
           }
 
@@ -224,7 +231,6 @@ export default definePluginEntry({
 
           // Try sessionKey from body first (gateway strips query params), then URL params
           const bodySessionKey = body.sessionKey;
-          const url = new URL(req.url || '/', 'http://localhost');
           const sessionKey = bodySessionKey || url.searchParams.get('sessionKey');
           if (!sessionKey) {
             res.statusCode = 400;
@@ -248,9 +254,6 @@ export default definePluginEntry({
 
           // Get system API for waking the agent session
           const systemApi = api.runtime?.system;
-          const diagLine = `[${new Date().toISOString()}] systemApi: ${!!systemApi}, enqueueSystemEvent: ${!!systemApi?.enqueueSystemEvent}, requestHeartbeatNow: ${!!systemApi?.requestHeartbeatNow}, runHeartbeatOnce: ${!!systemApi?.runHeartbeatOnce}`;
-          console.error(`[approval-callback] ${diagLine}`);
-          try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', diagLine + '\n'); } catch(_e) {}
           if (!systemApi?.enqueueSystemEvent) {
             console.error(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
           }
@@ -266,8 +269,7 @@ export default definePluginEntry({
               sessionKey
             );
 
-            // Safety net: always clear the lock after handling a callback,
-            // even if resumeApprovalFlow had partial failures
+            // Safety net: always clear the lock after handling a callback
             forceClearApprovalLock(request_id);
 
             // Send HTTP response FIRST — must fully flush before attempting wake
@@ -290,22 +292,15 @@ export default definePluginEntry({
                     sessionKey,
                     coalesceMs: 100
                   });
-                  try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Post-response requestHeartbeatNow called (setImmediate)\n`); } catch(_e) {}
                 }
                 if (systemApi?.runHeartbeatOnce) {
                   systemApi.runHeartbeatOnce({
                     sessionKey,
                     reason: wakeReason,
                     heartbeat: { target: "last" }
-                  })
-                    .then((r: any) => {
-                      try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Post-response runHeartbeatOnce result: ${JSON.stringify(r)}\n`); } catch(_e) {}
-                    })
-                    .catch((e: any) => {
-                      try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Post-response runHeartbeatOnce error: ${e}\n`); } catch(_e) {}
-                    });
+                  }).catch(() => {});
                 }
-                // Second wake attempt after a short delay in case the first was still "in-flight"
+                // Second wake attempt after a short delay
                 setTimeout(() => {
                   try {
                     systemApi.requestHeartbeatNow?.({
@@ -313,16 +308,14 @@ export default definePluginEntry({
                       sessionKey,
                       coalesceMs: 0
                     });
-                    try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Delayed requestHeartbeatNow (500ms)\n`); } catch(_e) {}
-                  } catch(_e) {}
+                  } catch (_e) {}
                 }, 500);
-              } catch (wakeErr) {
-                try { require('fs').appendFileSync('/tmp/approval-wake-debug.log', `[${new Date().toISOString()}] Wake error: ${wakeErr}\n`); } catch(_e) {}
+              } catch (_wakeErr) {
+                // Wake best-effort
               }
             });
           } catch (error) {
             console.error(`[approval-callback] Error: ${error}`);
-            // Even on exception, clear the lock so it doesn't get stuck
             forceClearApprovalLock(request_id);
             res.statusCode = 500;
             res.end(JSON.stringify({ error: "Failed to resume TaskFlow", details: String(error), request_id }));
@@ -331,7 +324,7 @@ export default definePluginEntry({
         }
       });
 
-      console.error("[openclaw-interaction-bridge] Registered /approval-callback route");
+      console.error("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
     }
   }
 });

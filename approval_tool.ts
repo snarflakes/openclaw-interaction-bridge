@@ -27,6 +27,15 @@ export interface ApprovalConfig {
   sessionKey: string;
 }
 
+// Plugin-side approval statistics
+export const approvalStats = {
+  requested: 0,
+  approved: 0,
+  rejected: 0,
+  timedOut: 0,
+  errored: 0,
+};
+
 /**
  * Check if the current approval lock is stale or orphaned, and clear it if so.
  * Returns true if the lock was cleared.
@@ -47,6 +56,7 @@ function clearStaleLock(): boolean {
   const elapsed = Date.now() - (currentApprovalStartedAt ?? entry.createdAt);
   if (elapsed > APPROVAL_LOCK_TIMEOUT_MS) {
     console.error(`[approval-tool] Clearing stale lock: ${currentApprovalInProgress} (held for ${Math.round(elapsed / 60000)}min, timeout=${APPROVAL_LOCK_TIMEOUT_MS / 60000}min)`);
+    approvalStats.timedOut++;
     pendingApprovals.delete(currentApprovalInProgress);
     currentApprovalInProgress = null;
     currentApprovalStartedAt = null;
@@ -161,6 +171,8 @@ export async function requestUserApproval(
     throw new Error(`Failed to set approval flow to waiting: ${detail}`);
   }
 
+  approvalStats.requested++;
+
   // Notify snarling display directly (port 5000) - no middleman
   // Include sessionKey so snarling can pass it back in the callback URL
   try {
@@ -177,6 +189,7 @@ export async function requestUserApproval(
     });
   } catch (_e) {
     console.error(`[approval-tool] Could not notify snarling: ${_e}`);
+    approvalStats.errored++;
   }
 
   // Return immediately — the webhook callback will resume the TaskFlow and
@@ -264,6 +277,7 @@ export async function resumeApprovalFlow(
     // Enqueue system event so the agent sees the approval on its next turn
     // Wake is now handled by the callback handler AFTER the HTTP response is sent
     const approvalResult = approved ? "APPROVED" : "REJECTED";
+    if (approved) { approvalStats.approved++; } else { approvalStats.rejected++; }
     try {
       systemApi.enqueueSystemEvent(
         `User approval response: ${approvalResult}. ${approved ? "Proceeding with the action." : "Action cancelled by user."} (request: ${requestId})`,
