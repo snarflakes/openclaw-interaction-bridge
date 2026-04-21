@@ -178,6 +178,50 @@ export default definePluginEntry({
       };
     }, { optional: true });
 
+    // Register send_notification tool — fire-and-forget notifications to snarling
+    api.registerTool((ctx: any) => {
+      return {
+        name: "send_notification",
+        description: "Send a notification to the snarling display. Fire-and-forget — does not wait for user response. Use for informational alerts, reminders, or status updates that don't require a decision.",
+        parameters: Type.Object({
+          message: Type.String({ description: "The notification message to display" }),
+          priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high")], { description: "Priority level: low, normal (default), or high", default: "normal" })),
+          duration: Type.Optional(Type.Number({ description: "Display duration in seconds (default: 30)", default: 30 }))
+        }),
+        async execute(_toolCallId: string, params: any) {
+          const { message, priority = "normal", duration = 30 } = params;
+
+          try {
+            const response = await fetch("http://localhost:5000/approval/alert", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                type: "notification",
+                message,
+                priority,
+                duration,
+                secret: APPROVAL_SECRET
+              })
+            });
+
+            if (!response.ok) {
+              return {
+                content: [{ type: "text", text: `Notification sent but snarling returned HTTP ${response.status}` }]
+              };
+            }
+
+            return {
+              content: [{ type: "text", text: `Notification sent: "${message}" (priority: ${priority}, duration: ${duration}s)` }]
+            };
+          } catch (error) {
+            return {
+              content: [{ type: "text", text: `Failed to send notification: ${error instanceof Error ? error.message : String(error)}` }]
+            };
+          }
+        }
+      };
+    }, { optional: true });
+
     // Register approval callback route (exact match)
     if (api.registerHttpRoute && !routeRegistered) {
       routeRegistered = true;

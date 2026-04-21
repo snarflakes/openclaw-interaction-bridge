@@ -6,6 +6,7 @@ A plugin that bridges OpenClaw agent activity to [Snarling](https://github.com/s
 
 - **State display**: Automatically sends agent state changes (processing, communicating, sleeping) to Snarling's display
 - **Physical approvals**: Registers a `request_user_approval` tool that routes yes/no decisions to Snarling's A/B buttons
+- **Notifications**: Registers a `send_notification` tool that sends fire-and-forget alerts to the display (preparation for thermal sensor / expression-first notifications)
 - **Approval tracking**: Counts approval lifecycle events (requested, approved, rejected, timed out, errored)
 
 ## Installation
@@ -73,6 +74,33 @@ When the agent calls `request_user_approval`:
 7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
 
 Only one approval at a time — subsequent requests are blocked until the current one is resolved (with a 30-minute stale timeout as a safety net).
+
+### Notification Flow
+
+When the agent calls `send_notification`:
+
+1. Plugin sends POST to Snarling's `/approval/alert` with `type: "notification"` in the body
+2. Current Snarling ignores the `type` field — it displays the notification like an approval (backwards compatible)
+3. Future Snarling update will recognize `type` and show expression-first notifications (face changes, no text until button press)
+4. No TaskFlow, no callback — fire-and-forget
+
+Parameters:
+- `message` (required) — the notification text
+- `priority` (optional) — "low", "normal" (default), or "high"
+- `duration` (optional) — seconds before auto-clear (default: 30)
+
+The notification payload sent to Snarling:
+```json
+{
+  "type": "notification",
+  "message": "Stove's been on 20 min",
+  "priority": "high",
+  "duration": 30,
+  "secret": "uuid"
+}
+```
+
+This is designed for the expression-first, consent-based notification model from the thermal sensor brainstorm: the agent changes its face expression to show concern, and the user presses a button if they want to see the text.
 
 ### Approval Tracker
 

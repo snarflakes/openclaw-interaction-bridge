@@ -1,7 +1,7 @@
 {
   "id": "openclaw-interaction-bridge",
   "name": "OpenClaw Interaction Bridge",
-  "description": "Bridge OpenClaw agent state and approval requests to Snarling (physical display + A/B buttons)",
+  "description": "Bridge OpenClaw agent state, approval requests, and notifications to Snarling (physical display + A/B buttons)",
   "skills": ["skills"],
   "channelEnvVars": {
     "approval": ["OPENCLAW_APPROVAL_SECRET"]
