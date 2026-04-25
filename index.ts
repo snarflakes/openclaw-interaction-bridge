@@ -188,10 +188,10 @@ export default definePluginEntry({
         parameters: Type.Object({
           message: Type.String({ description: "The notification message to display" }),
           priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high")], { description: "Priority level: low, normal (default), or high", default: "normal" })),
-          duration: Type.Optional(Type.Number({ description: "Display duration in seconds (default: 30)", default: 30 }))
+          duration: Type.Optional(Type.Number({ description: "Display duration in seconds (0 = use priority-based default: low=300s, others=no timeout)", default: 0 }))
         }),
         async execute(_toolCallId: string, params: any) {
-          const { message, priority = "normal", duration = 30 } = params;
+          const { message, priority = "normal", duration = 0 } = params;
 
           // Try TaskFlow-based notification with feedback
           if (sessionKey) {
