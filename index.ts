@@ -6,7 +6,7 @@
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
-import { requestUserApproval, resumeApprovalFlow, forceClearApprovalLock, approvalStats } from "./approval_tool";
+import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
@@ -178,8 +178,10 @@ export default definePluginEntry({
       };
     }, { optional: true });
 
-    // Register send_notification tool — fire-and-forget notifications to snarling
+    // Register send_notification tool — with feedback tracking via TaskFlow
     api.registerTool((ctx: any) => {
+      const sessionKey = ctx?.sessionKey;
+
       return {
         name: "send_notification",
         description: "Send a notification to the snarling display. Fire-and-forget — does not wait for user response. Use for informational alerts, reminders, or status updates that don't require a decision.",
@@ -191,6 +193,41 @@ export default definePluginEntry({
         async execute(_toolCallId: string, params: any) {
           const { message, priority = "normal", duration = 30 } = params;
 
+          // Try TaskFlow-based notification with feedback
+          if (sessionKey) {
+            let taskFlow: any = null;
+            try {
+              taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
+            } catch (e) {
+              console.error(`[notification-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+            }
+
+            if (!taskFlow) {
+              const taskFlowApi = api.runtime?.taskFlow;
+              if (taskFlowApi?.bindSession) {
+                console.error(`[notification-tool] Using bindSession with sessionKey=${sessionKey}`);
+                taskFlow = taskFlowApi.bindSession({
+                  sessionKey,
+                  requesterOrigin: "openclaw-interaction-bridge/notification-tool"
+                });
+              }
+            }
+
+            if (taskFlow) {
+              const callbackUrl = `${CALLBACK_BASE_URL}/notification-callback`;
+              try {
+                const result = await sendNotificationWithFeedback({ message, priority, duration }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
+                return {
+                  content: [{ type: "text", text: result }]
+                };
+              } catch (error) {
+                // Fall through to fire-and-forget on TaskFlow error
+                console.error(`[notification-tool] TaskFlow notification failed, falling back to fire-and-forget: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+          }
+
+          // Fallback: fire-and-forget notification (no feedback)
           try {
             const response = await fetch("http://localhost:5000/approval/alert", {
               method: "POST",
@@ -369,6 +406,143 @@ export default definePluginEntry({
       });
 
       console.error("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
+
+      // Register notification callback route (exact match)
+      api.registerHttpRoute({
+        method: "POST",
+        path: "/notification-callback",
+        auth: "gateway",
+        match: "exact",
+        replaceExisting: true,
+        handler: async (req: any, res: any) => {
+          // Parse body from raw request
+          let body: any = {};
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) { chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk); }
+            const raw = Buffer.concat(chunks).toString();
+            body = JSON.parse(raw);
+          } catch (_e) {
+            console.error(`[notification-callback] Failed to parse body: ${_e}`);
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return true;
+          }
+
+          // Stats request
+          if (body.action === 'stats') {
+            res.statusCode = 200;
+            res.end(JSON.stringify({ stats: notificationStats }));
+            return true;
+          }
+
+          const { notification_id, revealed, time_to_reveal_sec, dismissed, timed_out, secret, sessionKey: bodySessionKey } = body;
+
+          if (!notification_id) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: "Missing notification_id" }));
+            return true;
+          }
+
+          console.error(`[notification-callback] Received: notification_id=${notification_id}, revealed=${revealed}, dismissed=${dismissed}`);
+
+          // Verify secret
+          if (secret !== APPROVAL_SECRET) {
+            console.error(`[notification-callback] Invalid secret for notification ${notification_id}`);
+            res.statusCode = 403;
+            res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
+            return true;
+          }
+
+          // sessionKey from body, or fall back to URL query params
+          const url = new URL(req.url || '/', `http://localhost`);
+          const sessionKey = bodySessionKey || url.searchParams.get('sessionKey');
+          if (!sessionKey) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
+            return true;
+          }
+          console.error(`[notification-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
+
+          // Bind TaskFlow to the session
+          const taskFlowApi = api.runtime?.taskFlow;
+          if (!taskFlowApi) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "TaskFlow API not available", notification_id }));
+            return true;
+          }
+
+          const boundTaskFlow = taskFlowApi.bindSession({
+            sessionKey,
+            requesterOrigin: "snarling-webhook"
+          });
+
+          // Get system API for waking the agent session
+          const systemApi = api.runtime?.system;
+          if (!systemApi?.enqueueSystemEvent) {
+            console.error(`[notification-callback] Warning: system API not available, agent may not wake up after notification feedback`);
+          }
+
+          try {
+            const result = await resumeNotificationFlow(
+              notification_id,
+              { revealed: revealed ?? null, time_to_reveal_sec: time_to_reveal_sec ?? null, dismissed: dismissed ?? null, timed_out: timed_out ?? undefined },
+              boundTaskFlow,
+              { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {}), requestHeartbeatNow: () => {}, runHeartbeatOnce: undefined },
+              sessionKey
+            );
+
+            // Send HTTP response FIRST
+            if (result.success) {
+              res.statusCode = 200;
+              res.end(JSON.stringify({ status: "success", notification_id, message: result.message }));
+            } else {
+              res.statusCode = 404;
+              res.end(JSON.stringify({ error: result.message, notification_id }));
+            }
+
+            // Schedule wake on NEXT event loop tick
+            setImmediate(() => {
+              try {
+                const wakeReason = "hook:notification_feedback";
+                if (systemApi?.requestHeartbeatNow) {
+                  systemApi.requestHeartbeatNow({
+                    reason: wakeReason,
+                    sessionKey,
+                    coalesceMs: 100
+                  });
+                }
+                if (systemApi?.runHeartbeatOnce) {
+                  systemApi.runHeartbeatOnce({
+                    sessionKey,
+                    reason: wakeReason,
+                    heartbeat: { target: "last" }
+                  }).catch(() => {});
+                }
+                // Second wake attempt after a short delay
+                setTimeout(() => {
+                  try {
+                    systemApi.requestHeartbeatNow?.({
+                      reason: wakeReason,
+                      sessionKey,
+                      coalesceMs: 0
+                    });
+                  } catch (_e) {}
+                }, 500);
+              } catch (_wakeErr) {
+                // Wake best-effort
+              }
+            });
+          } catch (error) {
+            console.error(`[notification-callback] Error: ${error}`);
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "Failed to resume notification TaskFlow", details: String(error), notification_id }));
+          }
+          return true;
+        }
+      });
+
+      console.error("[openclaw-interaction-bridge] Registered /notification-callback route");
     }
   }
 });
