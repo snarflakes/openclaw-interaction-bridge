@@ -432,7 +432,7 @@ export async function sendNotificationWithFeedback(
  */
 export async function resumeNotificationFlow(
   notificationId: string,
-  feedback: { revealed: boolean | null; time_to_reveal_sec: number | null; time_to_reveal_display_sec?: number | null; time_in_queue_sec?: number | null; dismissed: boolean | null; timed_out?: boolean },
+  feedback: { revealed: boolean | null; time_to_reveal_sec: number | null; dismissed: boolean | null; timed_out?: boolean },
   taskFlowApi: any,
   systemApi: { enqueueSystemEvent: (text: string, opts: { sessionKey: string }) => void; requestHeartbeatNow: (opts: any) => void; runHeartbeatOnce?: (opts: any) => Promise<any> },
   sessionKey: string
@@ -464,8 +464,6 @@ export async function resumeNotificationFlow(
         ...flow.stateJson,
         revealed: feedback.revealed,
         timeToRevealSec: feedback.time_to_reveal_sec,
-        timeToRevealDisplaySec: feedback.time_to_reveal_display_sec ?? null,
-        timeInQueueSec: feedback.time_in_queue_sec ?? null,
         dismissed: feedback.dismissed,
         timedOut: feedback.timed_out ?? false,
       },
@@ -484,8 +482,6 @@ export async function resumeNotificationFlow(
         ...resumed.flow.stateJson,
         revealed: feedback.revealed,
         timeToRevealSec: feedback.time_to_reveal_sec,
-        timeToRevealDisplaySec: feedback.time_to_reveal_display_sec ?? null,
-        timeInQueueSec: feedback.time_in_queue_sec ?? null,
         dismissed: feedback.dismissed,
         timedOut: feedback.timed_out ?? false,
       },
@@ -506,11 +502,9 @@ export async function resumeNotificationFlow(
 
     // Enqueue system event so the agent sees the feedback on its next turn
     const timedOutStr = feedback.timed_out ? ", timed_out=true" : "";
-    const queueStr = feedback.time_in_queue_sec != null ? `, time_in_queue_sec=${feedback.time_in_queue_sec}` : "";
-    const displayStr = feedback.time_to_reveal_display_sec != null ? `, time_to_reveal_display_sec=${feedback.time_to_reveal_display_sec}` : "";
     try {
       systemApi.enqueueSystemEvent(
-        `Notification feedback: revealed=${feedback.revealed}, time_to_reveal_sec=${feedback.time_to_reveal_sec}${displayStr}${queueStr}, dismissed=${feedback.dismissed}${timedOutStr} (id: ${notificationId})`,
+        `Notification feedback: revealed=${feedback.revealed}, time_to_reveal_sec=${feedback.time_to_reveal_sec}, dismissed=${feedback.dismissed}${timedOutStr} (id: ${notificationId})`,
         { sessionKey }
       );
     } catch (wakeErr) {
