@@ -436,7 +436,7 @@ export default definePluginEntry({
             return true;
           }
 
-          const { notification_id, revealed, time_to_reveal_sec, dismissed, timed_out, secret, sessionKey: bodySessionKey } = body;
+          const { notification_id, revealed, time_to_reveal_sec, time_to_reveal_display_sec, time_in_queue_sec, dismissed, timed_out, secret, sessionKey: bodySessionKey } = body;
 
           if (!notification_id) {
             res.statusCode = 400;
@@ -486,7 +486,7 @@ export default definePluginEntry({
           try {
             const result = await resumeNotificationFlow(
               notification_id,
-              { revealed: revealed ?? null, time_to_reveal_sec: time_to_reveal_sec ?? null, dismissed: dismissed ?? null, timed_out: timed_out ?? undefined },
+              { revealed: revealed ?? null, time_to_reveal_sec: time_to_reveal_sec ?? null, time_to_reveal_display_sec: time_to_reveal_display_sec ?? undefined, time_in_queue_sec: time_in_queue_sec ?? undefined, dismissed: dismissed ?? null, timed_out: timed_out ?? undefined },
               boundTaskFlow,
               { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {}), requestHeartbeatNow: () => {}, runHeartbeatOnce: undefined },
               sessionKey
