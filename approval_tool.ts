@@ -330,7 +330,7 @@ export async function sendNotificationWithFeedback(
   taskFlow: any,
   config: ApprovalConfig
 ): Promise<string> {
-  const { message, priority = "normal", duration = 300 } = input;
+  const { message, priority = "normal", duration = 0 } = input;  // 0 = no timeout, let snarling decide based on priority
   const { callbackUrl, approvalSecret, sessionKey } = config;
 
   const notificationId = `notify-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
