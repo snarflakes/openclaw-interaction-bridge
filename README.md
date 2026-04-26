@@ -1,6 +1,6 @@
 # OpenClaw Interaction Bridge
 
-A plugin that bridges OpenClaw agent activity to [Snarling](https://github.com/snarflakes/snarling) — a Raspberry Pi + DisplayHAT Mini companion that shows what the agent is doing and lets you approve or reject actions with physical A/B buttons.
+A plugin that bridges OpenClaw agent activity to any external program! [Snarling](https://github.com/snarflakes/snarling) for example — a Raspberry Pi + DisplayHAT Mini companion that shows what the agent is doing and lets you approve or reject actions with physical A/B buttons and lets agents send notifications with a feedback loop for attunement!
 
 ## What It Does
 
