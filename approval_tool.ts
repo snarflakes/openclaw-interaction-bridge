@@ -5,8 +5,17 @@
 interface PendingEntry {
   flowId: string;
   createdAt: number;
+  sessionKey?: string;
 }
 const pendingApprovals = new Map<string, PendingEntry>();
+
+// Store pending notifications (notification_id -> { flowId, createdAt, sessionKey })
+interface PendingNotificationEntry {
+  flowId: string;
+  createdAt: number;
+  sessionKey: string;
+}
+const pendingNotifications = new Map<string, PendingNotificationEntry>();
 
 // Track if an approval is currently in progress (global lock)
 // Now includes timestamp for staleness detection
@@ -32,6 +41,15 @@ export const approvalStats = {
   requested: 0,
   approved: 0,
   rejected: 0,
+  timedOut: 0,
+  errored: 0,
+};
+
+// Plugin-side notification statistics
+export const notificationStats = {
+  sent: 0,
+  revealed: 0,
+  dismissed: 0,
   timedOut: 0,
   errored: 0,
 };
@@ -300,4 +318,202 @@ export async function resumeApprovalFlow(
  */
 export function getPendingApprovalFlowId(requestId: string): string | undefined {
   return pendingApprovals.get(requestId)?.flowId;
+}
+
+/**
+ * Send a notification with feedback tracking using TaskFlow.
+ * Creates a managed TaskFlow, sets it to waiting state, notifies snarling,
+ * and returns immediately. The webhook callback will resume the flow later.
+ */
+export async function sendNotificationWithFeedback(
+  input: { message: string; priority?: string; duration?: number },
+  taskFlow: any,
+  config: ApprovalConfig
+): Promise<string> {
+  const { message, priority = "normal", duration = 0 } = input;  // 0 = no timeout, let snarling decide based on priority
+  const { callbackUrl, approvalSecret, sessionKey } = config;
+
+  const notificationId = `notify-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+  if (!taskFlow) {
+    throw new Error("TaskFlow API not available - cannot create notification flow");
+  }
+
+  // Create a managed TaskFlow for this notification
+  const truncatedMessage = message.length > 50 ? message.substring(0, 50) + "..." : message;
+  const created = await taskFlow.createManaged({
+    controllerId: "openclaw-interaction-bridge/notification",
+    goal: `Notification feedback: ${truncatedMessage}`,
+    currentStep: "awaiting_user_interaction",
+    stateJson: {
+      notificationId,
+      message,
+      priority,
+      revealed: null,
+      dismissed: null,
+      timeToRevealSec: null,
+      timedOut: null,
+    },
+  });
+
+  if (!created || !created.flowId) {
+    const detail = created ? JSON.stringify(created) : "null result";
+    throw new Error(`Failed to create notification TaskFlow: ${detail}`);
+  }
+
+  const flowId = created.flowId;
+  const now = Date.now();
+
+  // Store mapping
+  pendingNotifications.set(notificationId, { flowId, createdAt: now, sessionKey });
+
+  // Set the flow to waiting state
+  const waiting = await taskFlow.setWaiting({
+    flowId,
+    expectedRevision: created.revision,
+    currentStep: "awaiting_user_interaction",
+    stateJson: {
+      notificationId,
+      message,
+      priority,
+      revealed: null,
+      dismissed: null,
+      timeToRevealSec: null,
+      timedOut: null,
+    },
+    waitJson: {
+      kind: "notification_feedback",
+      channel: "snarling",
+      notificationId,
+      message,
+      priority,
+    },
+  });
+
+  if (!waiting || !waiting.applied) {
+    // Clean up on failure
+    pendingNotifications.delete(notificationId);
+    const detail = waiting ? JSON.stringify(waiting) : "null result";
+    throw new Error(`Failed to set notification flow to waiting: ${detail}`);
+  }
+
+  notificationStats.sent++;
+
+  // Notify snarling display directly (port 5000)
+  try {
+    await fetch("http://localhost:5000/approval/alert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "notification",
+        notification_id: notificationId,
+        message,
+        priority,
+        duration,
+        secret: approvalSecret,
+        callback_url: callbackUrl,
+        sessionKey,
+      }),
+    });
+  } catch (_e) {
+    console.error(`[notification-tool] Could not notify snarling: ${_e}`);
+    notificationStats.errored++;
+  }
+
+  // Return immediately — the webhook callback will resume the TaskFlow and
+  // enqueue a system event with the notification feedback result.
+  console.error(`[notification-tool] Notification sent, waiting for feedback (id: ${notificationId})`);
+  return `⏳ Notification sent, awaiting feedback.\n\nMessage: ${message}\nPriority: ${priority}\nID: ${notificationId}`;
+}
+
+/**
+ * Resume a waiting notification TaskFlow with user feedback.
+ * Called by the webhook handler when snarling reports user interaction.
+ */
+export async function resumeNotificationFlow(
+  notificationId: string,
+  feedback: { revealed: boolean | null; time_to_reveal_sec: number | null; dismissed: boolean | null; timed_out?: boolean },
+  taskFlowApi: any,
+  systemApi: { enqueueSystemEvent: (text: string, opts: { sessionKey: string }) => void; requestHeartbeatNow: (opts: any) => void; runHeartbeatOnce?: (opts: any) => Promise<any> },
+  sessionKey: string
+): Promise<{ success: boolean; message: string }> {
+  const entry = pendingNotifications.get(notificationId);
+
+  if (!entry) {
+    return { success: false, message: `No pending notification found for id: ${notificationId}` };
+  }
+
+  const flowId = entry.flowId;
+
+  try {
+    // Get current flow state
+    const getResult = await taskFlowApi.get(flowId);
+    const flow = getResult?.flow ?? getResult;
+    if (!flow || !flow.flowId) {
+      pendingNotifications.delete(notificationId);
+      return { success: false, message: `TaskFlow not found: ${flowId}` };
+    }
+
+    // Resume the flow with the notification feedback
+    const resumed = await taskFlowApi.resume({
+      flowId,
+      expectedRevision: flow.revision,
+      status: "running",
+      currentStep: "notification_responded",
+      stateJson: {
+        ...flow.stateJson,
+        revealed: feedback.revealed,
+        timeToRevealSec: feedback.time_to_reveal_sec,
+        dismissed: feedback.dismissed,
+        timedOut: feedback.timed_out ?? false,
+      },
+    });
+
+    if (!resumed || !resumed.applied) {
+      pendingNotifications.delete(notificationId);
+      return { success: false, message: `Failed to resume flow: ${resumed?.reason || "unknown error"}` };
+    }
+
+    // Finish the flow
+    const finished = await taskFlowApi.finish({
+      flowId,
+      expectedRevision: resumed.flow.revision,
+      stateJson: {
+        ...resumed.flow.stateJson,
+        revealed: feedback.revealed,
+        timeToRevealSec: feedback.time_to_reveal_sec,
+        dismissed: feedback.dismissed,
+        timedOut: feedback.timed_out ?? false,
+      },
+    });
+
+    if (!finished || !finished.applied) {
+      console.error(`[notification-tool] Warning: could not finish flow ${flowId}: ${finished?.reason || "unknown"}`);
+    }
+
+    // Update stats
+    if (feedback.timed_out) {
+      notificationStats.timedOut++;
+    } else if (feedback.revealed) {
+      notificationStats.revealed++;
+    } else if (feedback.dismissed) {
+      notificationStats.dismissed++;
+    }
+
+    // Enqueue system event so the agent sees the feedback on its next turn
+    const timedOutStr = feedback.timed_out ? ", timed_out=true" : "";
+    try {
+      systemApi.enqueueSystemEvent(
+        `Notification feedback: revealed=${feedback.revealed}, time_to_reveal_sec=${feedback.time_to_reveal_sec}, dismissed=${feedback.dismissed}${timedOutStr} (id: ${notificationId})`,
+        { sessionKey }
+      );
+    } catch (wakeErr) {
+      console.error(`[notification-tool] Warning: failed to enqueue system event: ${wakeErr}`);
+    }
+
+    return { success: true, message: `Notification feedback received for ${notificationId}` };
+  } finally {
+    // ALWAYS clean up
+    pendingNotifications.delete(notificationId);
+  }
 }
