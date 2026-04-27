@@ -159,7 +159,7 @@ export default definePluginEntry({
             };
           }
 
-          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
+          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback`;
 
           try {
             const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
