@@ -1,6 +1,9 @@
 ---
 name: openclaw_interaction_bridge
 description: "Use the Snarling physical display and A/B button approval system connected to this agent. When loaded, Snarling is already working — state changes (processing, communicating, sleeping) appear on the display automatically. Use request_user_approval for yes/no decisions before destructive or external actions: deleting files, sending emails, publishing packages, deploying to production, transferring funds."
+type: code-plugin
+envVars:
+  - OPENCLAW_APPROVAL_SECRET
 metadata:
   openclaw:
     emoji: "🟥"

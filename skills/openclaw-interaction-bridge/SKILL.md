@@ -1,6 +1,9 @@
 ---
 name: openclaw_interaction_bridge
 description: "Use the Snarling physical display, A/B button approval system, and notification feedback loop connected to this agent. When loaded, Snarling is already working — state changes (processing, communicating, sleeping) appear on the display automatically. Use request_user_approval for yes/no decisions before destructive or external actions. Use send_notification for informational alerts with a feedback loop that learns what you respond to."
+type: code-plugin
+envVars:
+  - OPENCLAW_APPROVAL_SECRET
 metadata:
   openclaw:
     emoji: "🟥"
