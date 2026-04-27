@@ -1,5 +1,5 @@
 {
-  "name": "@snarflakes/openclaw-interaction-bridge",
+  "name": "openclaw-interaction-bridge",
   "version": "1.6.1",
   "description": "Bridge OpenClaw agent state directly to snarling display via HTTP API, with notification support",
   "main": "index.ts",
