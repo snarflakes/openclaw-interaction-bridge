@@ -2,6 +2,25 @@
 
 A plugin that bridges OpenClaw agent activity to any external program! [Snarling](https://github.com/snarflakes/snarling) for example — a Raspberry Pi + DisplayHAT Mini companion that shows what the agent is doing and lets you approve or reject actions with physical A/B buttons and lets agents send notifications with a feedback loop for attunement!
 
+## ⚠️ Optional Config (OpenClaw 2026.4.26+)
+
+For optional status update functionality, you must add `hooks.allowConversationAccess: true` to the plugin config entry. This is required due to permissions changes in version 2026.4.26. No conversation data is read, only state tracking for status updates.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-interaction-bridge": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+Without this setting, the `agent_end` hook is silently blocked and the display won't transition to sleeping. Approvals and notifications still work regardless.
+
 ## What It Does
 
 - **State display**: Automatically sends agent state changes (processing, communicating, sleeping) to Snarling's display
