@@ -138,6 +138,25 @@ Feedback is sent **once per notification** — on reveal (A press), dismiss (B p
 
 ## Setup
 
+### Optional: Status Updates (OpenClaw 2026.4.26+)
+
+For optional status update functionality (processing/communicating/sleeping), you must add `hooks.allowConversationAccess: true` to the plugin config entry. This is required due to permissions changes in version 2026.4.26. No conversation data is read, only state tracking for status updates. Approvals and notifications work regardless.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-interaction-bridge": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+Without this setting, the `agent_end` hook is silently blocked and the display won't transition to sleeping.
+
 ### Prerequisites
 
 - Raspberry Pi with DisplayHAT Mini
