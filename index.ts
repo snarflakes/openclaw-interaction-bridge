@@ -5,7 +5,7 @@
 // - Exposes /approval-callback and /approval/stats HTTP endpoints
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
@@ -159,7 +159,7 @@ export default definePluginEntry({
             };
           }
 
-          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback?sessionKey=${encodeURIComponent(sessionKey)}`;
+          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback`;
 
           try {
             const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });

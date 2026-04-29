@@ -1,6 +1,9 @@
 ---
 name: openclaw_interaction_bridge
-description: "Use the Snarling physical display, A/B button approval system, and notification feedback loop connected to this agent. When loaded, Snarling is already working — state changes (processing, communicating, sleeping) appear on the display automatically. Use request_user_approval for yes/no decisions before destructive or external actions. Use send_notification for informational alerts with a feedback loop that learns what you respond to."
+description: "Bridge OpenClaw agent interactions to any external program! The Snarling demo, for example, shows what the agent is doing and lets you approve or reject actions with physical A/B buttons and send notifications with a feedback loop for attunement."
+type: code-plugin
+envVars:
+  - OPENCLAW_APPROVAL_SECRET
 metadata:
   openclaw:
     emoji: "🟥"
@@ -134,6 +137,25 @@ Every notification gets a feedback callback:
 Feedback is sent **once per notification** — on reveal (A press), dismiss (B press), or timeout. Post-reveal dismiss does not send a second callback.
 
 ## Setup
+
+### Optional: Status Updates (OpenClaw 2026.4.26+)
+
+For optional status update functionality (processing/communicating/sleeping), you must add `hooks.allowConversationAccess: true` to the plugin config entry. This is required due to permissions changes in version 2026.4.26. No conversation data is read, only state tracking for status updates. Approvals and notifications work regardless.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-interaction-bridge": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+Without this setting, the `agent_end` hook is silently blocked and the display won't transition to sleeping.
 
 ### Prerequisites
 

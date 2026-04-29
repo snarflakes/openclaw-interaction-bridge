@@ -6,6 +6,7 @@
   "channelEnvVars": {
     "approval": ["OPENCLAW_APPROVAL_SECRET"]
   },
+  "envVars": ["OPENCLAW_APPROVAL_SECRET"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
