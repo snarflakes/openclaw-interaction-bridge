@@ -11,6 +11,7 @@ import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNo
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
 const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
+const ENVIRONMENTAL_SESSION_KEY = process.env.ENVIRONMENTAL_SESSION_KEY || '';
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
@@ -80,6 +81,18 @@ async function updateState(status: string, sessionId: string) {
   } catch (_e) {
     // Silent fail - snarling is optional
   }
+}
+
+function formatEnvironmentalEvent(event: any): string {
+  if (event.type === 'presence_change') {
+    let msg = event.present ? 'someone is now present' : 'nobody here';
+    if (event.absent_duration) {
+      msg += ` (absent for ${event.absent_duration})`;
+    }
+    return `Presence changed: ${msg}`;
+  }
+  // Future event types will be added here (v3: extended_absence, thermal_anomaly, etc.)
+  return `Environmental event: ${JSON.stringify(event)}`;
 }
 
 export default definePluginEntry({
@@ -543,6 +556,60 @@ export default definePluginEntry({
       });
 
       console.error("[openclaw-interaction-bridge] Registered /notification-callback route");
+
+      // Register environmental event route (exact match)
+      api.registerHttpRoute({
+        method: "POST",
+        path: "/environmental-event",
+        auth: "gateway",
+        match: "exact",
+        replaceExisting: true,
+        handler: async (req: any, res: any) => {
+          // Parse body from raw request
+          let body: any = {};
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) { chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk); }
+            const raw = Buffer.concat(chunks).toString();
+            body = JSON.parse(raw);
+          } catch (_e) {
+            console.error(`[environmental-event] Failed to parse body: ${_e}`);
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return true;
+          }
+
+          // Auth is handled by gateway Bearer token (auth: "gateway" on this route).
+          // No body.secret check needed — environmental events originate from snarling,
+          // which authenticates via Authorization header. The body.secret pattern is
+          // for callbacks where snarling received the secret from a prior tool call.
+
+          console.error(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
+
+          // Route based on ENVIRONMENTAL_SESSION_KEY
+          // If empty/unset, acknowledge but don't enqueue (default off)
+          if (ENVIRONMENTAL_SESSION_KEY) {
+            const systemApi = api.runtime?.system;
+            if (systemApi?.enqueueSystemEvent) {
+              systemApi.enqueueSystemEvent(
+                formatEnvironmentalEvent(body),
+                { sessionKey: ENVIRONMENTAL_SESSION_KEY }
+              );
+              console.error(`[environmental-event] Enqueued to session: ${ENVIRONMENTAL_SESSION_KEY}`);
+            } else {
+              console.error(`[environmental-event] systemApi.enqueueSystemEvent not available, event dropped`);
+            }
+          } else {
+            console.error(`[environmental-event] No ENVIRONMENTAL_SESSION_KEY set, event acknowledged but not enqueued`);
+          }
+
+          res.statusCode = 200;
+          res.end(JSON.stringify({ status: "received" }));
+          return true;
+        }
+      });
+
+      console.error("[openclaw-interaction-bridge] Registered /environmental-event route");
     }
   }
 });
