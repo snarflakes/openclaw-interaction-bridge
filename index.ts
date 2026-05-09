@@ -15,6 +15,12 @@ const ENVIRONMENTAL_SESSION_KEY = process.env.ENVIRONMENTAL_SESSION_KEY || '';
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
+let lastPresenceSettledAt = 0; // Dedupe window for presence_settled wake
+
+// Wake policy: only wake agent for settled events (not transient presence_change)
+function shouldWakeAgent(eventType: string): boolean {
+  return eventType === "presence_settled";
+}
 
 // Track if HTTP route is registered (only register once)
 let routeRegistered = false;
@@ -90,6 +96,13 @@ function formatEnvironmentalEvent(event: any): string {
       msg += ` (absent for ${event.absent_duration})`;
     }
     return `Presence changed: ${msg}`;
+  }
+  if (event.type === 'presence_settled') {
+    let msg = 'presence settled';
+    if (event.absent_duration) {
+      msg += ` (absent for ${event.absent_duration} before return)`;
+    }
+    return `Presence settled: ${msg}`;
   }
   // Future event types will be added here (v3: extended_absence, thermal_anomaly, etc.)
   return `Environmental event: ${JSON.stringify(event)}`;
@@ -605,6 +618,48 @@ export default definePluginEntry({
 
           res.statusCode = 200;
           res.end(JSON.stringify({ status: "received" }));
+
+          // Wake agent immediately for settled events (not presence_change)
+          if (shouldWakeAgent(body.type)) {
+            const now = Date.now();
+            if (now - lastPresenceSettledAt > 5000) {  // 5s dedupe window
+              lastPresenceSettledAt = now;
+              setImmediate(() => {
+                try {
+                  const systemApi = api.runtime?.system;
+                  if (systemApi?.requestHeartbeatNow) {
+                    systemApi.requestHeartbeatNow({
+                      reason: `hook:${body.type}`,
+                      sessionKey: ENVIRONMENTAL_SESSION_KEY,
+                      coalesceMs: 500
+                    });
+                  }
+                  if (systemApi?.runHeartbeatOnce) {
+                    systemApi.runHeartbeatOnce({
+                      sessionKey: ENVIRONMENTAL_SESSION_KEY,
+                      reason: `hook:${body.type}`,
+                      heartbeat: { target: "last" }
+                    }).catch(() => {});
+                  }
+                  // Second wake attempt after a short delay (belt-and-suspenders)
+                  setTimeout(() => {
+                    try {
+                      systemApi?.requestHeartbeatNow?.({
+                        reason: `hook:${body.type}`,
+                        sessionKey: ENVIRONMENTAL_SESSION_KEY,
+                        coalesceMs: 0
+                      });
+                    } catch (_e) {}
+                  }, 500);
+                } catch (_wakeErr) {
+                  console.error(`[environmental-event] Wake failed:`, _wakeErr);
+                }
+              });
+            } else {
+              console.error(`[environmental-event] Skipping wake for ${body.type} (dedupe window)`);
+            }
+          }
+
           return true;
         }
       });
