@@ -149,7 +149,7 @@ The feedback payload received from Snarling:
 |----------|----------------|----------|
 | **high** | None (0) | Stays until user interacts — never auto-dismisses |
 | **normal** | None (0) | Stays until user interacts — never auto-dismisses |
-| **low** | 300s (5 min) | Auto-dismisses after timeout, sends `timed_out` feedback |
+| **low** | 28800s (8h) | Auto-dismisses after timeout, sends `timed_out` feedback |
 
 The plugin sends `duration: 0` by default, letting Snarling decide based on priority. No urgent or moderate notification should ever just disappear.
 
