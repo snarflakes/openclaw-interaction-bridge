@@ -98,7 +98,7 @@ The plugin registers a `send_notification` tool that sends informational alerts 
 |---|---|---|---|
 | `message` | string | Yes | The notification text, max **60 chars** ideal. Shown across 2-3 rotating banners on the display. |
 | `priority` | string | No | `high`, `normal` (default), or `low`. Controls LED color, status boxes, and timeout behavior. |
-| `duration` | number | No | Display duration in seconds. Default `0` = use priority-based timeout (high/normal: no timeout; low: 300s auto-dismiss). |
+| `duration` | number | No | Display duration in seconds. Default `0` = use priority-based timeout (high/normal: no timeout; low: 28800s auto-dismiss). |
 
 #### Priority Behavior
 
@@ -106,7 +106,7 @@ The plugin registers a `send_notification` tool that sends informational alerts 
 |---|---|---|---|---|
 | `high` | Warm orange | 5/5 filled | None | Stays until you interact |
 | `normal` | Yellow | 3/5 filled | None | Stays until you interact |
-| `low` | Soft yellow | 1/5 filled | 300s | Auto-dismisses, sends `timed_out` feedback |
+| `low` | Soft yellow | 1/5 filled | 28800s (8h) | Auto-dismisses, sends `timed_out` feedback |
 
 #### How It Works
 
@@ -172,7 +172,36 @@ For the approval secret (used to authenticate callback requests), set the `OPENC
 
 No config file needed yet — when there are multiple adapters, a config-driven system will make sense. For now, editing the source is simpler and more honest.
 
-## Architecture
+## Optional Config (OpenClaw 2026.4.26+)
+
+For optional status update functionality, you must add `hooks.allowConversationAccess: true` to the plugin config entry. This is required due to permissions changes in version 2026.4.26. No conversation data is read — only state tracking for status updates.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-interaction-bridge": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+Without this setting, the `agent_end` hook is silently blocked and the display won't transition to sleeping. Approvals and notifications still work regardless.
+
+## Environmental Events
+
+Snarling can forward thermal sensor events to the plugin. The plugin formats them for the agent:
+
+| Event type | Format |
+|---|---|
+| `presence_change` | `Presence changed: someone is now present (absent for XmYs)` |
+| `presence_settled` | `Presence settled: presence settled (absent for Xs before return)` |
+
+`presence_settled` fires 90 seconds after a person arrives and stays. The agent wakes on `presence_settled` (not transient `presence_change`) to avoid spam from frequent in/out detection.
+
 
 ```
 ┌─────────────┐     HTTP POST      ┌──────────────┐   button press    ┌──────────────┐
