@@ -5,7 +5,7 @@
 // - Exposes /approval-callback and /approval/stats HTTP endpoints
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { Type } from "typebox";
+import { Type } from "@sinclair/typebox";
 import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
@@ -109,7 +109,7 @@ function formatEnvironmentalEvent(event: any): string {
 }
 
 export default definePluginEntry({
-  id: "openclaw-interaction-bridge",
+  id: "openclaw-interaction-bridge-v2",
   name: "OpenClaw Interaction Bridge",
   description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api: any) {

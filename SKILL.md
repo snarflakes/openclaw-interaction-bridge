@@ -1,5 +1,5 @@
 ---
-name: openclaw_interaction_bridge
+name: openclaw-interaction-bridge-v2
 description: "Bridge OpenClaw agent interactions to any external program! The Snarling demo, for example, shows what the agent is doing and lets you approve or reject actions with physical A/B buttons and send notifications with a feedback loop for attunement."
 type: code-plugin
 envVars:
