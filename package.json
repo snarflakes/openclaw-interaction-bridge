@@ -22,5 +22,8 @@
       "openclawVersion": "2026.4.5",
       "pluginSdkVersion": "2026.4.5"
     }
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
   }
 }
