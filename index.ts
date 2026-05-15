@@ -6,6 +6,7 @@
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
+import { exec } from "child_process";
 import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
@@ -599,13 +600,52 @@ export default definePluginEntry({
 
           console.error(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
 
-          // Route based on ENVIRONMENTAL_SESSION_KEY
-          // If empty/unset, acknowledge but don't enqueue (default off)
+          // Build event text for both enqueue and CLI wake
+          const eventText = formatEnvironmentalEvent(body);
+
+          // Determine if this event type should trigger an immediate wake
+          const shouldWake = shouldWakeAgent(body.type);
+          const now = Date.now();
+          const dedupeOk = shouldWake && (now - lastPresenceSettledAt > 5000);
+
+          // Wake via CLI: `openclaw system event --mode now` enqueues AND triggers heartbeat
+          // This is more reliable than the JS API (requestHeartbeatNow/runHeartbeatOnce)
+          // which don't reliably wake an idle agent.
+          if (shouldWake && dedupeOk) {
+            lastPresenceSettledAt = now;
+            // Send HTTP response FIRST — must flush before CLI wake triggers agent
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "received" }));
+
+            const escapedText = JSON.stringify(eventText);
+            const cliCommand = `openclaw system event --mode now --text ${escapedText} --timeout 5000`;
+            console.error(`[environmental-event] Attempting CLI wake for ${body.type}`);
+
+            exec(cliCommand, { timeout: 10000 }, (error, stdout, stderr) => {
+              if (error) {
+                console.error(`[environmental-event] CLI wake failed: ${error.message}`);
+                // Fallback: enqueue via JS API so event is at least queued (just won't wake immediately)
+                const systemApi = api.runtime?.system;
+                if (systemApi?.enqueueSystemEvent && ENVIRONMENTAL_SESSION_KEY) {
+                  systemApi.enqueueSystemEvent(eventText, { sessionKey: ENVIRONMENTAL_SESSION_KEY });
+                  console.error(`[environmental-event] Fallback: enqueued via systemApi (agent won't wake immediately)`);
+                } else {
+                  console.error(`[environmental-event] Fallback failed: systemApi or sessionKey not available`);
+                }
+              } else {
+                console.error(`[environmental-event] CLI wake succeeded for ${body.type}`);
+                if (stderr) console.error(`[environmental-event] CLI stderr: ${stderr.trim()}`);
+              }
+            });
+            return true;
+          }
+
+          // Non-wake path or no token: just enqueue via JS API and acknowledge
           if (ENVIRONMENTAL_SESSION_KEY) {
             const systemApi = api.runtime?.system;
             if (systemApi?.enqueueSystemEvent) {
               systemApi.enqueueSystemEvent(
-                formatEnvironmentalEvent(body),
+                eventText,
                 { sessionKey: ENVIRONMENTAL_SESSION_KEY }
               );
               console.error(`[environmental-event] Enqueued to session: ${ENVIRONMENTAL_SESSION_KEY}`);
@@ -618,47 +658,6 @@ export default definePluginEntry({
 
           res.statusCode = 200;
           res.end(JSON.stringify({ status: "received" }));
-
-          // Wake agent immediately for settled events (not presence_change)
-          if (shouldWakeAgent(body.type)) {
-            const now = Date.now();
-            if (now - lastPresenceSettledAt > 5000) {  // 5s dedupe window
-              lastPresenceSettledAt = now;
-              setImmediate(() => {
-                try {
-                  const systemApi = api.runtime?.system;
-                  if (systemApi?.requestHeartbeatNow) {
-                    systemApi.requestHeartbeatNow({
-                      reason: `hook:${body.type}`,
-                      sessionKey: ENVIRONMENTAL_SESSION_KEY,
-                      coalesceMs: 500
-                    });
-                  }
-                  if (systemApi?.runHeartbeatOnce) {
-                    systemApi.runHeartbeatOnce({
-                      sessionKey: ENVIRONMENTAL_SESSION_KEY,
-                      reason: `hook:${body.type}`,
-                      heartbeat: { target: "last" }
-                    }).catch(() => {});
-                  }
-                  // Second wake attempt after a short delay (belt-and-suspenders)
-                  setTimeout(() => {
-                    try {
-                      systemApi?.requestHeartbeatNow?.({
-                        reason: `hook:${body.type}`,
-                        sessionKey: ENVIRONMENTAL_SESSION_KEY,
-                        coalesceMs: 0
-                      });
-                    } catch (_e) {}
-                  }, 500);
-                } catch (_wakeErr) {
-                  console.error(`[environmental-event] Wake failed:`, _wakeErr);
-                }
-              });
-            } else {
-              console.error(`[environmental-event] Skipping wake for ${body.type} (dedupe window)`);
-            }
-          }
 
           return true;
         }
