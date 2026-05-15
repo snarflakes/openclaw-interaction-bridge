@@ -4,10 +4,9 @@
   "description": "Bridge OpenClaw agent state, approval requests, and notifications to Snarling (physical display + A/B buttons)",
   "skills": ["skills"],
   "channelEnvVars": {
-    "approval": ["OPENCLAW_APPROVAL_SECRET"],
-    "environmental": ["ENVIRONMENTAL_SESSION_KEY"]
+    "approval": ["OPENCLAW_APPROVAL_SECRET"]
   },
-  "envVars": ["OPENCLAW_APPROVAL_SECRET", "ENVIRONMENTAL_SESSION_KEY"],
+  "envVars": ["OPENCLAW_APPROVAL_SECRET"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

@@ -12,7 +12,8 @@ import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNo
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
 const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
-const ENVIRONMENTAL_SESSION_KEY = process.env.ENVIRONMENTAL_SESSION_KEY || '';
+// ENVIRONMENTAL_SESSION_KEY removed — CLI wake handles session routing via gateway
+// Non-wake events are informational and will be picked up by next heartbeat
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
@@ -623,15 +624,7 @@ export default definePluginEntry({
 
             exec(cliCommand, { timeout: 10000 }, (error, stdout, stderr) => {
               if (error) {
-                console.error(`[environmental-event] CLI wake failed: ${error.message}`);
-                // Fallback: enqueue via JS API so event is at least queued (just won't wake immediately)
-                const systemApi = api.runtime?.system;
-                if (systemApi?.enqueueSystemEvent && ENVIRONMENTAL_SESSION_KEY) {
-                  systemApi.enqueueSystemEvent(eventText, { sessionKey: ENVIRONMENTAL_SESSION_KEY });
-                  console.error(`[environmental-event] Fallback: enqueued via systemApi (agent won't wake immediately)`);
-                } else {
-                  console.error(`[environmental-event] Fallback failed: systemApi or sessionKey not available`);
-                }
+                console.error(`[environmental-event] CLI wake failed: ${error.message}. Event will be picked up by next heartbeat.`);
               } else {
                 console.error(`[environmental-event] CLI wake succeeded for ${body.type}`);
                 if (stderr) console.error(`[environmental-event] CLI stderr: ${stderr.trim()}`);
@@ -640,21 +633,9 @@ export default definePluginEntry({
             return true;
           }
 
-          // Non-wake path or no token: just enqueue via JS API and acknowledge
-          if (ENVIRONMENTAL_SESSION_KEY) {
-            const systemApi = api.runtime?.system;
-            if (systemApi?.enqueueSystemEvent) {
-              systemApi.enqueueSystemEvent(
-                eventText,
-                { sessionKey: ENVIRONMENTAL_SESSION_KEY }
-              );
-              console.error(`[environmental-event] Enqueued to session: ${ENVIRONMENTAL_SESSION_KEY}`);
-            } else {
-              console.error(`[environmental-event] systemApi.enqueueSystemEvent not available, event dropped`);
-            }
-          } else {
-            console.error(`[environmental-event] No ENVIRONMENTAL_SESSION_KEY set, event acknowledged but not enqueued`);
-          }
+          // Non-wake events: acknowledge but don't enqueue.
+          // Agent will see these via next heartbeat if needed.
+          console.error(`[environmental-event] Non-wake event ${body.type} acknowledged`);
 
           res.statusCode = 200;
           res.end(JSON.stringify({ status: "received" }));
