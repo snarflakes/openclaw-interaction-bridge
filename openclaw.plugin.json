@@ -7,6 +7,9 @@
     "approval": ["OPENCLAW_APPROVAL_SECRET"]
   },
   "envVars": ["OPENCLAW_APPROVAL_SECRET"],
+  "contracts": {
+    "tools": ["request_user_approval", "send_notification"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

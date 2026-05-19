@@ -3033,8 +3033,7 @@ var index_default = definePluginEntry({
               // Pass minimal systemApi — just enqueueSystemEvent
               // Wake will happen AFTER HTTP response is sent
               { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {
-              }), requestHeartbeatNow: () => {
-              }, runHeartbeatOnce: void 0 },
+              }), requestHeartbeat: systemApi?.requestHeartbeat?.bind(systemApi) },
               sessionKey
             );
             forceClearApprovalLock(request_id);
@@ -3048,32 +3047,25 @@ var index_default = definePluginEntry({
             setImmediate(() => {
               try {
                 const wakeReason = "hook:approval";
-                if (systemApi?.requestHeartbeatNow) {
+                // v2026.5.18: requestHeartbeatNow is deprecated compatibility glue.
+                // Use the new structured requestHeartbeat with explicit source/intent
+                // so the wake is classified as hook/manual and drains immediately.
+                if (systemApi?.requestHeartbeat) {
+                  systemApi.requestHeartbeat({
+                    source: "hook",
+                    intent: "immediate",
+                    reason: wakeReason,
+                    sessionKey
+                  });
+                } else if (systemApi?.requestHeartbeatNow) {
                   systemApi.requestHeartbeatNow({
                     reason: wakeReason,
                     sessionKey,
-                    coalesceMs: 100
+                    coalesceMs: 0
                   });
                 }
-                if (systemApi?.runHeartbeatOnce) {
-                  systemApi.runHeartbeatOnce({
-                    sessionKey,
-                    reason: wakeReason,
-                    heartbeat: { target: "last" }
-                  }).catch(() => {
-                  });
-                }
-                setTimeout(() => {
-                  try {
-                    systemApi.requestHeartbeatNow?.({
-                      reason: wakeReason,
-                      sessionKey,
-                      coalesceMs: 0
-                    });
-                  } catch (_e) {
-                  }
-                }, 500);
               } catch (_wakeErr) {
+                console.error(`[approval-callback] Wake error: ${_wakeErr}`);
               }
             });
           } catch (error) {
@@ -3153,8 +3145,7 @@ var index_default = definePluginEntry({
               { revealed: revealed ?? null, time_to_reveal_sec: time_to_reveal_sec ?? null, dismissed: dismissed ?? null, timed_out: timed_out ?? void 0 },
               boundTaskFlow,
               { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {
-              }), requestHeartbeatNow: () => {
-              }, runHeartbeatOnce: void 0 },
+              }), requestHeartbeat: systemApi?.requestHeartbeat?.bind(systemApi) },
               sessionKey
             );
             if (result.success) {
@@ -3167,32 +3158,24 @@ var index_default = definePluginEntry({
             setImmediate(() => {
               try {
                 const wakeReason = "hook:notification_feedback";
-                if (systemApi?.requestHeartbeatNow) {
+                // v2026.5.18: requestHeartbeatNow is deprecated compatibility glue.
+                // Use the new structured requestHeartbeat with explicit source/intent.
+                if (systemApi?.requestHeartbeat) {
+                  systemApi.requestHeartbeat({
+                    source: "hook",
+                    intent: "immediate",
+                    reason: wakeReason,
+                    sessionKey
+                  });
+                } else if (systemApi?.requestHeartbeatNow) {
                   systemApi.requestHeartbeatNow({
                     reason: wakeReason,
                     sessionKey,
-                    coalesceMs: 100
+                    coalesceMs: 0
                   });
                 }
-                if (systemApi?.runHeartbeatOnce) {
-                  systemApi.runHeartbeatOnce({
-                    sessionKey,
-                    reason: wakeReason,
-                    heartbeat: { target: "last" }
-                  }).catch(() => {
-                  });
-                }
-                setTimeout(() => {
-                  try {
-                    systemApi.requestHeartbeatNow?.({
-                      reason: wakeReason,
-                      sessionKey,
-                      coalesceMs: 0
-                    });
-                  } catch (_e) {
-                  }
-                }, 500);
               } catch (_wakeErr) {
+                console.error(`[notification-callback] Wake error: ${_wakeErr}`);
               }
             });
           } catch (error) {
