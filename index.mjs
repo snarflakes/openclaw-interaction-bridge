@@ -3050,6 +3050,7 @@ var index_default = definePluginEntry({
                 // v2026.5.18: requestHeartbeatNow is deprecated compatibility glue.
                 // Use the new structured requestHeartbeat with explicit source/intent
                 // so the wake is classified as hook/manual and drains immediately.
+                // Mirrors old pattern: requestHeartbeat + runHeartbeatOnce + delayed retry.
                 if (systemApi?.requestHeartbeat) {
                   systemApi.requestHeartbeat({
                     source: "hook",
@@ -3061,9 +3062,34 @@ var index_default = definePluginEntry({
                   systemApi.requestHeartbeatNow({
                     reason: wakeReason,
                     sessionKey,
-                    coalesceMs: 0
+                    coalesceMs: 100
                   });
                 }
+                if (systemApi?.runHeartbeatOnce) {
+                  systemApi.runHeartbeatOnce({
+                    sessionKey,
+                    reason: wakeReason,
+                    heartbeat: { target: "last" }
+                  }).catch(() => {});
+                }
+                setTimeout(() => {
+                  try {
+                    if (systemApi?.requestHeartbeat) {
+                      systemApi.requestHeartbeat({
+                        source: "hook",
+                        intent: "immediate",
+                        reason: wakeReason,
+                        sessionKey
+                      });
+                    } else if (systemApi?.requestHeartbeatNow) {
+                      systemApi.requestHeartbeatNow?.({
+                        reason: wakeReason,
+                        sessionKey,
+                        coalesceMs: 0
+                      });
+                    }
+                  } catch (_e) {}
+                }, 500);
               } catch (_wakeErr) {
                 console.error(`[approval-callback] Wake error: ${_wakeErr}`);
               }
@@ -3160,6 +3186,7 @@ var index_default = definePluginEntry({
                 const wakeReason = "hook:notification_feedback";
                 // v2026.5.18: requestHeartbeatNow is deprecated compatibility glue.
                 // Use the new structured requestHeartbeat with explicit source/intent.
+                // Mirrors old pattern: requestHeartbeat + runHeartbeatOnce + delayed retry.
                 if (systemApi?.requestHeartbeat) {
                   systemApi.requestHeartbeat({
                     source: "hook",
@@ -3171,9 +3198,34 @@ var index_default = definePluginEntry({
                   systemApi.requestHeartbeatNow({
                     reason: wakeReason,
                     sessionKey,
-                    coalesceMs: 0
+                    coalesceMs: 100
                   });
                 }
+                if (systemApi?.runHeartbeatOnce) {
+                  systemApi.runHeartbeatOnce({
+                    sessionKey,
+                    reason: wakeReason,
+                    heartbeat: { target: "last" }
+                  }).catch(() => {});
+                }
+                setTimeout(() => {
+                  try {
+                    if (systemApi?.requestHeartbeat) {
+                      systemApi.requestHeartbeat({
+                        source: "hook",
+                        intent: "immediate",
+                        reason: wakeReason,
+                        sessionKey
+                      });
+                    } else if (systemApi?.requestHeartbeatNow) {
+                      systemApi.requestHeartbeatNow?.({
+                        reason: wakeReason,
+                        sessionKey,
+                        coalesceMs: 0
+                      });
+                    }
+                  } catch (_e) {}
+                }, 500);
               } catch (_wakeErr) {
                 console.error(`[notification-callback] Wake error: ${_wakeErr}`);
               }
