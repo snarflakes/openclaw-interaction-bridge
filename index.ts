@@ -6,14 +6,17 @@
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
-import { exec } from "child_process";
+// exec import removed — environmental-event handler now uses in-process SDK
 import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
 const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
-// ENVIRONMENTAL_SESSION_KEY removed — CLI wake handles session routing via gateway
+// Session routing now handled by in-process SDK (enqueueSystemEvent + runHeartbeatOnce)
 // Non-wake events are informational and will be picked up by next heartbeat
+//
+// presenceTarget config: routes presence events to a specific agent (default: 'main')
+// Set via plugins.entries.openclaw-interaction-bridge-v2.config.presenceTarget
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const IDLE_DELAY_MS = 10000; // 10 seconds of no activity = go idle
 let lastState = ""; // Track last state sent to avoid duplicates
@@ -164,13 +167,13 @@ export default definePluginEntry({
           try {
             taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
           } catch (e) {
-            console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+            console.warn(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
           }
 
           if (!taskFlow) {
             const taskFlowApi = api.runtime?.taskFlow;
             if (taskFlowApi?.bindSession) {
-              console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
+              console.info(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
               taskFlow = taskFlowApi.bindSession({
                 sessionKey,
                 requesterOrigin: "openclaw-interaction-bridge/approval-tool"
@@ -227,13 +230,13 @@ export default definePluginEntry({
             try {
               taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
             } catch (e) {
-              console.error(`[notification-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+              console.warn(`[notification-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
             }
 
             if (!taskFlow) {
               const taskFlowApi = api.runtime?.taskFlow;
               if (taskFlowApi?.bindSession) {
-                console.error(`[notification-tool] Using bindSession with sessionKey=${sessionKey}`);
+                console.info(`[notification-tool] Using bindSession with sessionKey=${sessionKey}`);
                 taskFlow = taskFlowApi.bindSession({
                   sessionKey,
                   requesterOrigin: "openclaw-interaction-bridge/notification-tool"
@@ -250,7 +253,7 @@ export default definePluginEntry({
                 };
               } catch (error) {
                 // Fall through to fire-and-forget on TaskFlow error
-                console.error(`[notification-tool] TaskFlow notification failed, falling back to fire-and-forget: ${error instanceof Error ? error.message : String(error)}`);
+                console.warn(`[notification-tool] TaskFlow notification failed, falling back to fire-and-forget: ${error instanceof Error ? error.message : String(error)}`);
               }
             }
           }
@@ -306,7 +309,7 @@ export default definePluginEntry({
             const raw = Buffer.concat(chunks).toString();
             body = JSON.parse(raw);
           } catch (_e) {
-            console.error(`[approval-callback] Failed to parse body: ${_e}`);
+            console.warn(`[approval-callback] Failed to parse body: ${_e}`);
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
             return true;
@@ -327,12 +330,12 @@ export default definePluginEntry({
             return true;
           }
 
-          console.error(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
+          console.info(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
 
           // Verify approval secret from request body
           const callbackSecret = secret;
           if (callbackSecret !== APPROVAL_SECRET) {
-            console.error(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);
+            console.warn(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);
             res.statusCode = 403;
             res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
             return true;
@@ -346,7 +349,7 @@ export default definePluginEntry({
             res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
             return true;
           }
-          console.error(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
+          console.info(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
 
           // Bind TaskFlow to the main session for webhook context
           const taskFlowApi = api.runtime?.taskFlow;
@@ -364,7 +367,7 @@ export default definePluginEntry({
           // Get system API for waking the agent session
           const systemApi = api.runtime?.system;
           if (!systemApi?.enqueueSystemEvent) {
-            console.error(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
+            console.warn(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
           }
 
           try {
@@ -433,7 +436,7 @@ export default definePluginEntry({
         }
       });
 
-      console.error("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
+      console.info("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
 
       // Register notification callback route (exact match)
       api.registerHttpRoute({
@@ -451,7 +454,7 @@ export default definePluginEntry({
             const raw = Buffer.concat(chunks).toString();
             body = JSON.parse(raw);
           } catch (_e) {
-            console.error(`[notification-callback] Failed to parse body: ${_e}`);
+            console.warn(`[notification-callback] Failed to parse body: ${_e}`);
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
             return true;
@@ -472,11 +475,11 @@ export default definePluginEntry({
             return true;
           }
 
-          console.error(`[notification-callback] Received: notification_id=${notification_id}, revealed=${revealed}, dismissed=${dismissed}`);
+          console.info(`[notification-callback] Received: notification_id=${notification_id}, revealed=${revealed}, dismissed=${dismissed}`);
 
           // Verify secret
           if (secret !== APPROVAL_SECRET) {
-            console.error(`[notification-callback] Invalid secret for notification ${notification_id}`);
+            console.warn(`[notification-callback] Invalid secret for notification ${notification_id}`);
             res.statusCode = 403;
             res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
             return true;
@@ -490,7 +493,7 @@ export default definePluginEntry({
             res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
             return true;
           }
-          console.error(`[notification-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
+          console.info(`[notification-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
 
           // Bind TaskFlow to the session
           const taskFlowApi = api.runtime?.taskFlow;
@@ -508,7 +511,7 @@ export default definePluginEntry({
           // Get system API for waking the agent session
           const systemApi = api.runtime?.system;
           if (!systemApi?.enqueueSystemEvent) {
-            console.error(`[notification-callback] Warning: system API not available, agent may not wake up after notification feedback`);
+            console.warn(`[notification-callback] Warning: system API not available, agent may not wake up after notification feedback`);
           }
 
           try {
@@ -530,7 +533,7 @@ export default definePluginEntry({
             }
 
             // Schedule wake on NEXT event loop tick
-            setImmediate(() => {
+            setImmediate(async () => {
               try {
                 const wakeReason = "hook:notification_feedback";
                 if (systemApi?.requestHeartbeatNow) {
@@ -557,6 +560,37 @@ export default definePluginEntry({
                     });
                   } catch (_e) {}
                 }, 500);
+
+                // Reliable fallback: POST to /hooks/wake to trigger heartbeat
+                // Plugin runtime APIs may silently no-op, but /hooks/wake always enqueues + requests heartbeat
+                try {
+                  const hooksToken = process.env.OPENCLAW_HOOKS_TOKEN || "voicebridge-local-hooks-secret";
+                  const hooksUrl = `http://127.0.0.1:${process.env.OPENCLAW_PORT || 18789}/hooks/wake`;
+                  const http = await import("http");
+                  const postData = JSON.stringify({ text: `Notification feedback received: ${notification_id}`, mode: "now" });
+                  const wakeReq = http.request(hooksUrl, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${hooksToken}`,
+                      "Content-Length": Buffer.byteLength(postData),
+                    },
+                    timeout: 3000,
+                  }, (wakeRes: any) => {
+                    let data = "";
+                    wakeRes.on("data", (chunk: any) => { data += chunk; });
+                    wakeRes.on("end", () => {
+                      console.info(`[notification-callback] /hooks/wake fallback response: ${wakeRes.statusCode} ${data}`);
+                    });
+                  });
+                  wakeReq.on("error", (e: any) => {
+                    console.warn(`[notification-callback] /hooks/wake fallback failed: ${e.message}`);
+                  });
+                  wakeReq.write(postData);
+                  wakeReq.end();
+                } catch (_wakeFallbackErr) {
+                  console.warn(`[notification-callback] /hooks/wake fallback error: ${_wakeFallbackErr}`);
+                }
               } catch (_wakeErr) {
                 // Wake best-effort
               }
@@ -570,7 +604,7 @@ export default definePluginEntry({
         }
       });
 
-      console.error("[openclaw-interaction-bridge] Registered /notification-callback route");
+      console.info("[openclaw-interaction-bridge] Registered /notification-callback route");
 
       // Register environmental event route (exact match)
       api.registerHttpRoute({
@@ -588,7 +622,7 @@ export default definePluginEntry({
             const raw = Buffer.concat(chunks).toString();
             body = JSON.parse(raw);
           } catch (_e) {
-            console.error(`[environmental-event] Failed to parse body: ${_e}`);
+            console.info(`[environmental-event] Failed to parse body: ${_e}`);
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
             return true;
@@ -599,9 +633,12 @@ export default definePluginEntry({
           // which authenticates via Authorization header. The body.secret pattern is
           // for callbacks where snarling received the secret from a prior tool call.
 
-          console.error(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
+          console.info(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
 
-          // Build event text for both enqueue and CLI wake
+          // Read presenceTarget from plugin config (default: 'main')
+          const presenceTarget = api.pluginConfig?.presenceTarget || 'main';
+
+          // Build event text for system event enqueue
           const eventText = formatEnvironmentalEvent(body);
 
           // Determine if this event type should trigger an immediate wake
@@ -609,33 +646,57 @@ export default definePluginEntry({
           const now = Date.now();
           const dedupeOk = shouldWake && (now - lastPresenceSettledAt > 5000);
 
-          // Wake via CLI: `openclaw system event --mode now` enqueues AND triggers heartbeat
-          // This is more reliable than the JS API (requestHeartbeatNow/runHeartbeatOnce)
-          // which don't reliably wake an idle agent.
           if (shouldWake && dedupeOk) {
             lastPresenceSettledAt = now;
-            // Send HTTP response FIRST — must flush before CLI wake triggers agent
+
+            // Route based on presenceTarget config — use in-process SDK (no HTTP loopback, no CLI)
+            const agentId = presenceTarget === 'main' ? 'main' : presenceTarget;
+            const sessionKey = `agent:${agentId}:main`;
+
+            console.info(`[environmental-event] Routing ${body.type} to agent '${agentId}' via in-process SDK (sessionKey=${sessionKey})`);
+
+            // Send HTTP response FIRST — flush before waking agent
             res.statusCode = 200;
-            res.end(JSON.stringify({ status: "received" }));
+            res.end(JSON.stringify({ status: "received", routedTo: agentId }));
 
-            const escapedText = JSON.stringify(eventText);
-            const cliCommand = `openclaw system event --mode now --text ${escapedText} --timeout 5000`;
-            console.error(`[environmental-event] Attempting CLI wake for ${body.type}`);
+            // Enqueue the system event on the target session
+            const systemApi = api.runtime?.system;
+            if (systemApi?.enqueueSystemEvent) {
+              const enqueued = systemApi.enqueueSystemEvent(eventText, {
+                sessionKey,
+                trusted: false,
+              });
+              console.info(`[environmental-event] enqueueSystemEvent result: ${enqueued} (sessionKey=${sessionKey})`);
+            } else {
+              console.warn(`[environmental-event] enqueueSystemEvent not available — event may not reach agent`);
+            }
 
-            exec(cliCommand, { timeout: 10000 }, (error, stdout, stderr) => {
-              if (error) {
-                console.error(`[environmental-event] CLI wake failed: ${error.message}. Event will be picked up by next heartbeat.`);
-              } else {
-                console.error(`[environmental-event] CLI wake succeeded for ${body.type}`);
-                if (stderr) console.error(`[environmental-event] CLI stderr: ${stderr.trim()}`);
-              }
-            });
+            // Wake the agent immediately via runHeartbeatOnce (fire-and-forget — don't await the full heartbeat cycle)
+            // Small delay to avoid race condition: enqueueSystemEvent may not be fully committed
+            // before runHeartbeatOnce checks the queue
+            if (systemApi?.runHeartbeatOnce) {
+              setTimeout(() => {
+                systemApi.runHeartbeatOnce({
+                  agentId,
+                  sessionKey,
+                  reason: "hook",
+                  heartbeat: { target: "last" },
+                }).then((wakeResult: any) => {
+                  console.info(`[environmental-event] runHeartbeatOnce result: ${JSON.stringify(wakeResult)} (agentId=${agentId})`);
+                }).catch((wakeErr: any) => {
+                  console.warn(`[environmental-event] runHeartbeatOnce failed: ${wakeErr instanceof Error ? wakeErr.message : String(wakeErr)}`);
+                });
+              }, 100);
+            } else {
+              console.warn(`[environmental-event] runHeartbeatOnce not available — agent may not wake immediately`);
+            }
+
             return true;
           }
 
           // Non-wake events: acknowledge but don't enqueue.
           // Agent will see these via next heartbeat if needed.
-          console.error(`[environmental-event] Non-wake event ${body.type} acknowledged`);
+          console.info(`[environmental-event] Non-wake event ${body.type} acknowledged`);
 
           res.statusCode = 200;
           res.end(JSON.stringify({ status: "received" }));
@@ -644,7 +705,7 @@ export default definePluginEntry({
         }
       });
 
-      console.error("[openclaw-interaction-bridge] Registered /environmental-event route");
+      console.info("[openclaw-interaction-bridge] Registered /environmental-event route");
     }
   }
 });
