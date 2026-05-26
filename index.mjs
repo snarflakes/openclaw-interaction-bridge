@@ -2669,7 +2669,6 @@ async function resumeNotificationFlow(notificationId, feedback, taskFlowApi, sys
   }
   const flowId = entry.flowId;
   console.info(`[resumeNotification] Resuming flow ${flowId} for notification ${notificationId} with action=${feedback.action}, sessionKey=${sessionKey}`);
-  const flowId = entry.flowId;
   try {
     const getResult = await taskFlowApi.get(flowId);
     const flow = getResult?.flow ?? getResult;
