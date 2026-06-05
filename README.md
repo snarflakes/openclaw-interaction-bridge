@@ -237,11 +237,11 @@ This is how environmental events reach the environmental agent instead of the ma
 | Event Type | When | Wake Agent? | Payload |
 |---|---|---|---|
 | `presence_settled` | Human present and stable for 60s | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
-| `heartbeat` | Every 30m (active) / 2-4h (inactive) | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
+| `observation_report` | Every 30m (active) / 2-4h (inactive) | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
 
 V2 changes to the plugin are minimal:
-- `formatEnvironmentalEvent()` — add `trigger_reason` to output text, handle `heartbeat` type
-- `shouldWakeAgent()` — return true for both `presence_settled` and `heartbeat`
+- `formatEnvironmentalEvent()` — add `trigger_reason` to output text, handle `observation_report` type
+- `shouldWakeAgent()` — return true for both `presence_settled` and `observation_report`
 - Event payloads now include `world_state` + `changes_since_last` — bridge just stringifies them
 
 No structural changes — same HTTP route, same `enqueueSystemEvent` + `runHeartbeatOnce` flow, same `presenceTarget` routing.
