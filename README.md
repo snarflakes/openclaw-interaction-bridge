@@ -205,11 +205,37 @@ Interaction Bridge Plugin
       ↓ (POST localhost:5000/approval/alert)       ← notification requests (type: "notification")
       ↑ (POST localhost:18789/approval-callback)   ← approval responses
       ↑ (POST localhost:18789/notification-callback) ← notification feedback (revealed/dismissed/timed out)
+      ↑ (POST localhost:18789/environmental-event)  ← thermal/presence events from snarling
 Snarling Display (Python service on port 5000)
       ↓ (WebSocket RPC wake)                        ← bypasses gateway requests-in-flight
 ```
 
 No approval_server middleman — the plugin talks directly to Snarling. Snarling resolves approvals and notifications via its A/B buttons and POSTs the result back to the gateway.
+
+### Environmental Event Flow
+
+Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HTTP route. The plugin formats them into system events and routes them to the environmental agent.
+
+**Current event types (V1):**
+
+| Event Type | When | Wake Agent? | Payload |
+|---|---|---|---|
+| `presence_change` | Human arrived or left | No | `present`, `absent_duration` |
+| `presence_settled` | Human present and stable for 60s | Yes | `absent_duration_sec` |
+
+**Planned event types (V2):**
+
+| Event Type | When | Wake Agent? | Payload |
+|---|---|---|---|
+| `presence_settled` | Human present and stable for 60s | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
+| `heartbeat` | Every 30m (active) / 2-4h (inactive) | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
+
+V2 changes to the plugin are minimal:
+- `formatEnvironmentalEvent()` — add `trigger_reason` to output text, handle `heartbeat` type
+- `shouldWakeAgent()` — return true for both `presence_settled` and `heartbeat`
+- Event payloads now include `world_state` + `changes_since_last` — bridge just stringifies them
+
+No structural changes — same HTTP route, same `enqueueSystemEvent` + `runHeartbeatOnce` flow.
 
 ## Install from ClawHub
 
