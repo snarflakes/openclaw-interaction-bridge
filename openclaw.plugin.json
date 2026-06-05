@@ -7,9 +7,18 @@
     "approval": ["OPENCLAW_APPROVAL_SECRET"]
   },
   "envVars": ["OPENCLAW_APPROVAL_SECRET"],
+  "contracts": {
+    "tools": ["request_user_approval", "send_notification"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "presenceTarget": {
+        "type": "string",
+        "description": "Agent ID to route presence_settled/presence_change events to. Default: 'main' (current behavior). Set to 'environmental' to route to the environmental agent.",
+        "default": "main"
+      }
+    }
   }
 }

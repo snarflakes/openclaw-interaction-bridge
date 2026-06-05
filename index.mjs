@@ -2391,8 +2391,8 @@ var approvalStats = {
 };
 var notificationStats = {
   sent: 0,
-  revealed: 0,
-  dismissed: 0,
+  accepted: 0,
+  rejected: 0,
   timedOut: 0,
   errored: 0
 };
@@ -2664,9 +2664,11 @@ ID: ${notificationId}`;
 async function resumeNotificationFlow(notificationId, feedback, taskFlowApi, systemApi, sessionKey) {
   const entry = pendingNotifications.get(notificationId);
   if (!entry) {
+    console.warn(`[resumeNotification] No pending notification found for id: ${notificationId}`);
     return { success: false, message: `No pending notification found for id: ${notificationId}` };
   }
   const flowId = entry.flowId;
+  console.info(`[resumeNotification] Resuming flow ${flowId} for notification ${notificationId} with action=${feedback.action}, sessionKey=${sessionKey}`);
   try {
     const getResult = await taskFlowApi.get(flowId);
     const flow = getResult?.flow ?? getResult;
@@ -2681,10 +2683,8 @@ async function resumeNotificationFlow(notificationId, feedback, taskFlowApi, sys
       currentStep: "notification_responded",
       stateJson: {
         ...flow.stateJson,
-        revealed: feedback.revealed,
-        timeToRevealSec: feedback.time_to_reveal_sec,
-        dismissed: feedback.dismissed,
-        timedOut: feedback.timed_out ?? false
+        action: feedback.action,
+        timeToRevealSec: feedback.time_to_reveal_sec
       }
     });
     if (!resumed || !resumed.applied) {
@@ -2696,26 +2696,23 @@ async function resumeNotificationFlow(notificationId, feedback, taskFlowApi, sys
       expectedRevision: resumed.flow.revision,
       stateJson: {
         ...resumed.flow.stateJson,
-        revealed: feedback.revealed,
-        timeToRevealSec: feedback.time_to_reveal_sec,
-        dismissed: feedback.dismissed,
-        timedOut: feedback.timed_out ?? false
+        action: feedback.action,
+        timeToRevealSec: feedback.time_to_reveal_sec
       }
     });
     if (!finished || !finished.applied) {
       console.error(`[notification-tool] Warning: could not finish flow ${flowId}: ${finished?.reason || "unknown"}`);
     }
-    if (feedback.timed_out) {
+    if (feedback.action === "timed_out") {
       notificationStats.timedOut++;
-    } else if (feedback.revealed) {
-      notificationStats.revealed++;
-    } else if (feedback.dismissed) {
-      notificationStats.dismissed++;
+    } else if (feedback.action === "accepted") {
+      notificationStats.accepted++;
+    } else if (feedback.action === "rejected") {
+      notificationStats.rejected++;
     }
-    const timedOutStr = feedback.timed_out ? ", timed_out=true" : "";
     try {
       systemApi.enqueueSystemEvent(
-        `Notification feedback: revealed=${feedback.revealed}, time_to_reveal_sec=${feedback.time_to_reveal_sec}, dismissed=${feedback.dismissed}${timedOutStr} (id: ${notificationId})`,
+        `Notification feedback: action=${feedback.action}, time_to_reveal_sec=${feedback.time_to_reveal_sec} (id: ${notificationId})`,
         { sessionKey }
       );
     } catch (wakeErr) {
@@ -2731,9 +2728,9 @@ async function resumeNotificationFlow(notificationId, feedback, taskFlowApi, sys
 var SNARLING_URL = "http://localhost:5000/state";
 var CALLBACK_BASE_URL = "http://localhost:18789";
 var APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
-var ENVIRONMENTAL_SESSION_KEY = process.env.ENVIRONMENTAL_SESSION_KEY || "";
 var idleTimeout = null;
-var IDLE_DELAY_MS = 1e4;
+var PROCESSING_IDLE_DELAY_MS = 1e4;
+var COMMUNICATING_IDLE_DELAY_MS = 1e4;
 var lastState = "";
 var lastPresenceSettledAt = 0;
 function shouldWakeAgent(eventType) {
@@ -2755,8 +2752,11 @@ async function updateState(status, sessionId) {
   try {
     const isCommunicating = status === "speaking";
     const stateToSend = isCommunicating ? "communicating" : mapToSnarlingState(status);
+    const idleDelay = isCommunicating ? COMMUNICATING_IDLE_DELAY_MS : PROCESSING_IDLE_DELAY_MS;
+    console.info(`[interaction-bridge-v2] updateState: status=${status} stateToSend=${stateToSend} lastState=${lastState} sessionId=${sessionId} idleDelay=${idleDelay}ms`);
     if (stateToSend === lastState) {
       if (idleTimeout) clearTimeout(idleTimeout);
+      const idleDelay2 = isCommunicating ? COMMUNICATING_IDLE_DELAY_MS : PROCESSING_IDLE_DELAY_MS;
       idleTimeout = setTimeout(() => {
         lastState = "";
         void fetch(SNARLING_URL, {
@@ -2765,7 +2765,7 @@ async function updateState(status, sessionId) {
           body: JSON.stringify({ state: "sleeping", timestamp: Date.now() })
         });
         idleTimeout = null;
-      }, IDLE_DELAY_MS);
+      }, idleDelay2);
       return;
     }
     lastState = stateToSend;
@@ -2777,6 +2777,7 @@ async function updateState(status, sessionId) {
       body: JSON.stringify({ state: stateToSend, timestamp: Date.now() })
     });
     if (status === "processing" || status === "speaking") {
+      const idleDelay2 = isCommunicating ? COMMUNICATING_IDLE_DELAY_MS : PROCESSING_IDLE_DELAY_MS;
       idleTimeout = setTimeout(() => {
         lastState = "";
         void fetch(SNARLING_URL, {
@@ -2785,7 +2786,7 @@ async function updateState(status, sessionId) {
           body: JSON.stringify({ state: "sleeping", timestamp: Date.now() })
         });
         idleTimeout = null;
-      }, IDLE_DELAY_MS);
+      }, idleDelay2);
     }
   } catch (_e) {
   }
@@ -2812,6 +2813,10 @@ var index_default = definePluginEntry({
   name: "OpenClaw Interaction Bridge",
   description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api) {
+    api.on("before_agent_start", (event) => {
+      const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
+      updateState("processing", sessionKey);
+    });
     api.on("before_tool_call", (event) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
@@ -2852,12 +2857,12 @@ var index_default = definePluginEntry({
           try {
             taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
           } catch (e) {
-            console.error(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+            console.warn(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
           }
           if (!taskFlow) {
             const taskFlowApi = api.runtime?.taskFlow;
             if (taskFlowApi?.bindSession) {
-              console.error(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
+              console.info(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
               taskFlow = taskFlowApi.bindSession({
                 sessionKey,
                 requesterOrigin: "openclaw-interaction-bridge/approval-tool"
@@ -2906,12 +2911,12 @@ var index_default = definePluginEntry({
             try {
               taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
             } catch (e) {
-              console.error(`[notification-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
+              console.warn(`[notification-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
             }
             if (!taskFlow) {
               const taskFlowApi = api.runtime?.taskFlow;
               if (taskFlowApi?.bindSession) {
-                console.error(`[notification-tool] Using bindSession with sessionKey=${sessionKey}`);
+                console.info(`[notification-tool] Using bindSession with sessionKey=${sessionKey}`);
                 taskFlow = taskFlowApi.bindSession({
                   sessionKey,
                   requesterOrigin: "openclaw-interaction-bridge/notification-tool"
@@ -2926,7 +2931,7 @@ var index_default = definePluginEntry({
                   content: [{ type: "text", text: result }]
                 };
               } catch (error) {
-                console.error(`[notification-tool] TaskFlow notification failed, falling back to fire-and-forget: ${error instanceof Error ? error.message : String(error)}`);
+                console.warn(`[notification-tool] TaskFlow notification failed, falling back to fire-and-forget: ${error instanceof Error ? error.message : String(error)}`);
               }
             }
           }
@@ -2976,7 +2981,7 @@ var index_default = definePluginEntry({
             const raw = Buffer.concat(chunks).toString();
             body = JSON.parse(raw);
           } catch (_e) {
-            console.error(`[approval-callback] Failed to parse body: ${_e}`);
+            console.warn(`[approval-callback] Failed to parse body: ${_e}`);
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
             return true;
@@ -2992,10 +2997,10 @@ var index_default = definePluginEntry({
             res.end(JSON.stringify({ error: "Missing request_id" }));
             return true;
           }
-          console.error(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
+          console.info(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
           const callbackSecret = secret;
           if (callbackSecret !== APPROVAL_SECRET) {
-            console.error(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);
+            console.warn(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);
             res.statusCode = 403;
             res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
             return true;
@@ -3007,7 +3012,7 @@ var index_default = definePluginEntry({
             res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
             return true;
           }
-          console.error(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
+          console.info(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
           const taskFlowApi = api.runtime?.taskFlow;
           if (!taskFlowApi) {
             res.statusCode = 500;
@@ -3020,7 +3025,7 @@ var index_default = definePluginEntry({
           });
           const systemApi = api.runtime?.system;
           if (!systemApi?.enqueueSystemEvent) {
-            console.error(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
+            console.warn(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
           }
           try {
             const result = await resumeApprovalFlow(
@@ -3082,7 +3087,7 @@ var index_default = definePluginEntry({
           return true;
         }
       });
-      console.error("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
+      console.info("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
       api.registerHttpRoute({
         method: "POST",
         path: "/notification-callback",
@@ -3099,7 +3104,7 @@ var index_default = definePluginEntry({
             const raw = Buffer.concat(chunks).toString();
             body = JSON.parse(raw);
           } catch (_e) {
-            console.error(`[notification-callback] Failed to parse body: ${_e}`);
+            console.warn(`[notification-callback] Failed to parse body: ${_e}`);
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
             return true;
@@ -3109,15 +3114,15 @@ var index_default = definePluginEntry({
             res.end(JSON.stringify({ stats: notificationStats }));
             return true;
           }
-          const { notification_id, revealed, time_to_reveal_sec, dismissed, timed_out, secret, sessionKey: bodySessionKey } = body;
+          const { notification_id, action, time_to_reveal_sec, secret, sessionKey: bodySessionKey } = body;
           if (!notification_id) {
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Missing notification_id" }));
             return true;
           }
-          console.error(`[notification-callback] Received: notification_id=${notification_id}, revealed=${revealed}, dismissed=${dismissed}`);
+          console.info(`[notification-callback] Received: notification_id=${notification_id}, action=${action}`);
           if (secret !== APPROVAL_SECRET) {
-            console.error(`[notification-callback] Invalid secret for notification ${notification_id}`);
+            console.warn(`[notification-callback] Invalid secret for notification ${notification_id}`);
             res.statusCode = 403;
             res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
             return true;
@@ -3129,7 +3134,7 @@ var index_default = definePluginEntry({
             res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
             return true;
           }
-          console.error(`[notification-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
+          console.info(`[notification-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
           const taskFlowApi = api.runtime?.taskFlow;
           if (!taskFlowApi) {
             res.statusCode = 500;
@@ -3142,12 +3147,12 @@ var index_default = definePluginEntry({
           });
           const systemApi = api.runtime?.system;
           if (!systemApi?.enqueueSystemEvent) {
-            console.error(`[notification-callback] Warning: system API not available, agent may not wake up after notification feedback`);
+            console.warn(`[notification-callback] Warning: system API not available, agent may not wake up after notification feedback`);
           }
           try {
             const result = await resumeNotificationFlow(
               notification_id,
-              { revealed: revealed ?? null, time_to_reveal_sec: time_to_reveal_sec ?? null, dismissed: dismissed ?? null, timed_out: timed_out ?? void 0 },
+              { action: action || "timed_out", time_to_reveal_sec: time_to_reveal_sec ?? null },
               boundTaskFlow,
               { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {
               }), requestHeartbeatNow: () => {
@@ -3161,7 +3166,7 @@ var index_default = definePluginEntry({
               res.statusCode = 404;
               res.end(JSON.stringify({ error: result.message, notification_id }));
             }
-            setImmediate(() => {
+            setImmediate(async () => {
               try {
                 const wakeReason = "hook:notification_feedback";
                 if (systemApi?.requestHeartbeatNow) {
@@ -3189,6 +3194,36 @@ var index_default = definePluginEntry({
                   } catch (_e) {
                   }
                 }, 500);
+                try {
+                  const hooksToken = process.env.OPENCLAW_HOOKS_TOKEN || "voicebridge-local-hooks-secret";
+                  const hooksUrl = `http://127.0.0.1:${process.env.OPENCLAW_PORT || 18789}/hooks/wake`;
+                  const http = await import("http");
+                  const postData = JSON.stringify({ text: `Notification feedback received: ${notification_id}`, mode: "now" });
+                  const wakeReq = http.request(hooksUrl, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${hooksToken}`,
+                      "Content-Length": Buffer.byteLength(postData)
+                    },
+                    timeout: 3e3
+                  }, (wakeRes) => {
+                    let data = "";
+                    wakeRes.on("data", (chunk) => {
+                      data += chunk;
+                    });
+                    wakeRes.on("end", () => {
+                      console.info(`[notification-callback] /hooks/wake fallback response: ${wakeRes.statusCode} ${data}`);
+                    });
+                  });
+                  wakeReq.on("error", (e) => {
+                    console.warn(`[notification-callback] /hooks/wake fallback failed: ${e.message}`);
+                  });
+                  wakeReq.write(postData);
+                  wakeReq.end();
+                } catch (_wakeFallbackErr) {
+                  console.warn(`[notification-callback] /hooks/wake fallback error: ${_wakeFallbackErr}`);
+                }
               } catch (_wakeErr) {
               }
             });
@@ -3200,7 +3235,7 @@ var index_default = definePluginEntry({
           return true;
         }
       });
-      console.error("[openclaw-interaction-bridge] Registered /notification-callback route");
+      console.info("[openclaw-interaction-bridge] Registered /notification-callback route");
       api.registerHttpRoute({
         method: "POST",
         path: "/environmental-event",
@@ -3217,72 +3252,59 @@ var index_default = definePluginEntry({
             const raw = Buffer.concat(chunks).toString();
             body = JSON.parse(raw);
           } catch (_e) {
-            console.error(`[environmental-event] Failed to parse body: ${_e}`);
+            console.info(`[environmental-event] Failed to parse body: ${_e}`);
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
             return true;
           }
-          console.error(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
-          if (ENVIRONMENTAL_SESSION_KEY) {
+          console.info(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
+          const presenceTarget = api.pluginConfig?.presenceTarget || "main";
+          const eventText = formatEnvironmentalEvent(body);
+          const shouldWake = shouldWakeAgent(body.type);
+          const now = Date.now();
+          const dedupeOk = shouldWake && now - lastPresenceSettledAt > 5e3;
+          if (shouldWake && dedupeOk) {
+            lastPresenceSettledAt = now;
+            const agentId = presenceTarget === "main" ? "main" : presenceTarget;
+            const sessionKey = `agent:${agentId}:main`;
+            console.info(`[environmental-event] Routing ${body.type} to agent '${agentId}' via in-process SDK (sessionKey=${sessionKey})`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "received", routedTo: agentId }));
             const systemApi = api.runtime?.system;
             if (systemApi?.enqueueSystemEvent) {
-              systemApi.enqueueSystemEvent(
-                formatEnvironmentalEvent(body),
-                { sessionKey: ENVIRONMENTAL_SESSION_KEY }
-              );
-              console.error(`[environmental-event] Enqueued to session: ${ENVIRONMENTAL_SESSION_KEY}`);
+              const enqueued = systemApi.enqueueSystemEvent(eventText, {
+                sessionKey,
+                trusted: false
+              });
+              console.info(`[environmental-event] enqueueSystemEvent result: ${enqueued} (sessionKey=${sessionKey})`);
             } else {
-              console.error(`[environmental-event] systemApi.enqueueSystemEvent not available, event dropped`);
+              console.warn(`[environmental-event] enqueueSystemEvent not available \u2014 event may not reach agent`);
             }
-          } else {
-            console.error(`[environmental-event] No ENVIRONMENTAL_SESSION_KEY set, event acknowledged but not enqueued`);
+            if (systemApi?.runHeartbeatOnce) {
+              setTimeout(() => {
+                systemApi.runHeartbeatOnce({
+                  agentId,
+                  sessionKey,
+                  reason: "hook",
+                  heartbeat: { target: "last" }
+                }).then((wakeResult) => {
+                  console.info(`[environmental-event] runHeartbeatOnce result: ${JSON.stringify(wakeResult)} (agentId=${agentId})`);
+                }).catch((wakeErr) => {
+                  console.warn(`[environmental-event] runHeartbeatOnce failed: ${wakeErr instanceof Error ? wakeErr.message : String(wakeErr)}`);
+                });
+              }, 300);
+            } else {
+              console.warn(`[environmental-event] runHeartbeatOnce not available \u2014 agent may not wake immediately`);
+            }
+            return true;
           }
+          console.info(`[environmental-event] Non-wake event ${body.type} acknowledged`);
           res.statusCode = 200;
           res.end(JSON.stringify({ status: "received" }));
-          if (shouldWakeAgent(body.type)) {
-            const now = Date.now();
-            if (now - lastPresenceSettledAt > 5e3) {
-              lastPresenceSettledAt = now;
-              setImmediate(() => {
-                try {
-                  const systemApi = api.runtime?.system;
-                  if (systemApi?.requestHeartbeatNow) {
-                    systemApi.requestHeartbeatNow({
-                      reason: `hook:${body.type}`,
-                      sessionKey: ENVIRONMENTAL_SESSION_KEY,
-                      coalesceMs: 500
-                    });
-                  }
-                  if (systemApi?.runHeartbeatOnce) {
-                    systemApi.runHeartbeatOnce({
-                      sessionKey: ENVIRONMENTAL_SESSION_KEY,
-                      reason: `hook:${body.type}`,
-                      heartbeat: { target: "last" }
-                    }).catch(() => {
-                    });
-                  }
-                  setTimeout(() => {
-                    try {
-                      systemApi?.requestHeartbeatNow?.({
-                        reason: `hook:${body.type}`,
-                        sessionKey: ENVIRONMENTAL_SESSION_KEY,
-                        coalesceMs: 0
-                      });
-                    } catch (_e) {
-                    }
-                  }, 500);
-                } catch (_wakeErr) {
-                  console.error(`[environmental-event] Wake failed:`, _wakeErr);
-                }
-              });
-            } else {
-              console.error(`[environmental-event] Skipping wake for ${body.type} (dedupe window)`);
-            }
-          }
           return true;
         }
       });
-      console.error("[openclaw-interaction-bridge] Registered /environmental-event route");
+      console.info("[openclaw-interaction-bridge] Registered /environmental-event route");
     }
   }
 });
