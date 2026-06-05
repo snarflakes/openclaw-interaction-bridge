@@ -23,10 +23,13 @@ const COMMUNICATING_IDLE_DELAY_MS = 10000; // 10s — reply is near-instant, sho
 let lastState = ""; // Track last state sent to avoid duplicates
 let lastPresenceSettledAt = 0; // Dedupe window for presence_settled wake
 
-// Wake policy: wake agent for presence_settled and heartbeat triggers
-// V1: only presence_settled. V2: adds heartbeat (adaptive interval from trigger scheduler)
+// Wake policy: wake agent for observation_report events
+// The event type is always observation_report; trigger_reason distinguishes why:
+//   "presence_settled" — human arrived and is stable
+//   "scheduled" — periodic check (30m active / 2-4h inactive)
+//   "startup" — first observation after boot
 function shouldWakeAgent(eventType: string): boolean {
-  return eventType === "presence_settled" || eventType === "heartbeat";
+  return eventType === "observation_report" || eventType === "presence_settled";
 }
 
 // Track if HTTP route is registered (only register once)
@@ -109,12 +112,20 @@ function formatEnvironmentalEvent(event: any): string {
     }
     return `Presence changed: ${msg}`;
   }
-  if (event.type === 'presence_settled') {
-    // V1: simple presence_settled from current snarling
-    // V2: includes trigger_reason, world_state, changes_since_last from trigger scheduler
-    const reason = event.trigger_reason || 'presence_settled';
-    let msg = `Trigger: ${reason}.`;
+  // V1 presence_settled without trigger_reason — current snarling sends this
+  if (event.type === 'presence_settled' && !event.trigger_reason) {
+    let msg = 'presence settled';
     if (event.absent_duration) {
+      msg += ` (absent for ${event.absent_duration} before return)`;
+    }
+    return `Presence settled: ${msg}`;
+  }
+  // V2 observation_report — unified event type from trigger scheduler
+  // trigger_reason: "presence_settled" | "scheduled" | "startup"
+  if (event.type === 'observation_report' || event.trigger_reason) {
+    const reason = event.trigger_reason || 'presence_settled';
+    let msg = `Observation report (${reason}).`;
+    if (event.absent_duration && reason === 'presence_settled') {
       msg += ` Absent for ${event.absent_duration} before return.`;
     }
     if (event.world_state) {
@@ -122,22 +133,7 @@ function formatEnvironmentalEvent(event: any): string {
     }
     if (event.changes_since_last) {
       const changes = event.changes_since_last;
-      if (changes.appeared) msg += ` New: ${Object.keys(changes.appeared).join(', ')}.`;
-      if (changes.disappeared) msg += ` Gone: ${Object.keys(changes.disappeared).join(', ')}.`;
-      if (changes.changed) msg += ` Changed: ${Object.keys(changes.changed).join(', ')}.`;
-    }
-    return msg;
-  }
-  // V2: heartbeat from trigger scheduler
-  if (event.type === 'heartbeat' || event.trigger_reason === 'heartbeat') {
-    const reason = event.trigger_reason || 'heartbeat';
-    let msg = `Trigger: ${reason}.`;
-    if (event.world_state) {
-      msg += ` World state: ${event.world_state.source_count} sources.`;
-    }
-    if (event.changes_since_last) {
-      const changes = event.changes_since_last;
-      if (changes.bootstrap) return `Bootstrap: ${event.world_state.source_count} sources.`;
+      if (changes.bootstrap) return `Observation report (${reason}): bootstrap, ${event.world_state.source_count} sources.`;
       if (changes.appeared) msg += ` New: ${Object.keys(changes.appeared).join(', ')}.`;
       if (changes.disappeared) msg += ` Gone: ${Object.keys(changes.disappeared).join(', ')}.`;
       if (changes.changed) msg += ` Changed: ${Object.keys(changes.changed).join(', ')}.`;
