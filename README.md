@@ -214,7 +214,16 @@ No approval_server middleman — the plugin talks directly to Snarling. Snarling
 
 ### Environmental Event Flow
 
-Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HTTP route. The plugin formats them into system events and routes them to the environmental agent.
+Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HTTP route. The plugin formats them into system events and routes them to the **configured target agent** (default: `main`, configurable via `presenceTarget` plugin config).
+
+**Event routing:** The bridge reads `presenceTarget` from plugin config. If set to `environmental`, events route to `agent:environmental:main` — the dedicated environmental agent session. If unset or `main`, events route to the main agent session.
+
+```json
+// Plugin config example
+{ "presenceTarget": "environmental" }
+```
+
+This is how environmental events reach the environmental agent instead of the main agent — no hardcoded routing, just a config value.
 
 **Current event types (V1):**
 
@@ -235,7 +244,7 @@ V2 changes to the plugin are minimal:
 - `shouldWakeAgent()` — return true for both `presence_settled` and `heartbeat`
 - Event payloads now include `world_state` + `changes_since_last` — bridge just stringifies them
 
-No structural changes — same HTTP route, same `enqueueSystemEvent` + `runHeartbeatOnce` flow.
+No structural changes — same HTTP route, same `enqueueSystemEvent` + `runHeartbeatOnce` flow, same `presenceTarget` routing.
 
 ## Install from ClawHub
 
