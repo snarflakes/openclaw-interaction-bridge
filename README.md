@@ -212,6 +212,41 @@ Snarling Display (Python service on port 5000)
 
 No approval_server middleman — the plugin talks directly to Snarling. Snarling resolves approvals and notifications via its A/B buttons and POSTs the result back to the gateway.
 
+### Environmental Events (V2 Protocol)
+
+The plugin receives presence and observation data from Snarling's thermal/environmental system via a `POST /environmental-event` route. This replaces the old V1 event types (`presence_change`, `presence_settled`) with a unified `observation_report` type.
+
+**V2 event format:**
+```json
+{
+  "type": "observation_report",
+  "trigger_reason": "presence_settled" | "scheduled" | "startup",
+  "present": true,
+  "absent_duration": "2h 15m",
+  "world_state": { "source_count": 3 },
+  "changes_since_last": {
+    "appeared": { "sensor_1": { ... } },
+    "disappeared": { ... },
+    "changed": { ... }
+  }
+}
+```
+
+**Trigger reasons:**
+- `presence_settled` — thermal sensor confirmed someone arrived/stayed (was V1's `presence_settled` event)
+- `scheduled` — 30-minute periodic observation tick
+- `startup` — first observation after service start
+
+**V1 backwards compatibility:** The plugin still handles V1 events for transition:
+- `presence_change` → formatted as a simple presence update (doesn't wake agent)
+- `presence_settled` (without `trigger_reason`) → treated as `observation_report` with `trigger_reason: "presence_settled"`
+
+**Wake behavior:** Only `observation_report` and V1 `presence_settled` wake the agent. `presence_change` is acknowledged but doesn't wake. A 5-second dedup window prevents double-wakes from V1/V2 overlap.
+
+**Configuration:** Set `presenceTarget` in plugin config to route events to a specific agent (default: `main`). Events are delivered via `enqueueSystemEvent` + a 300ms-delayed `runHeartbeatOnce` wake.
+
+**Migration note:** Once Snarling is fully on V2, the V1 compat paths can be removed. During transition, both `observation_report` (V2) and `presence_settled` (V1) will wake the agent for the same semantic event — the dedup window prevents double-waking.
+
 ### Environmental Event Flow
 
 Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HTTP route. The plugin formats them into system events and routes them to the **configured target agent** (default: `main`, configurable via `presenceTarget` plugin config).
