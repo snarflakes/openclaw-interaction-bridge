@@ -9429,7 +9429,10 @@ var COMMUNICATING_IDLE_DELAY_MS = 1e4;
 var lastState = "";
 var lastPresenceSettledAt = 0;
 function shouldWakeAgent(eventType) {
-  return eventType === "observation_report" || eventType === "presence_settled";
+  // Only observation_report wakes the agent.
+  // presence_change is enqueued but doesn't wake — too frequent.
+  // presence_settled is now a trigger_reason inside observation_report.
+  return eventType === "observation_report";
 }
 var routeRegistered = false;
 function mapToSnarlingState(status) {
@@ -9493,13 +9496,6 @@ function formatEnvironmentalEvent(event) {
       msg += ` (absent for ${event.absent_duration})`;
     }
     return `Presence changed: ${msg}`;
-  }
-  if (event.type === "presence_settled" && !event.trigger_reason) {
-    let msg = "presence settled";
-    if (event.absent_duration) {
-      msg += ` (absent for ${event.absent_duration} before return)`;
-    }
-    return `Presence settled: ${msg}`;
   }
   if (event.type === "observation_report" || event.trigger_reason) {
     const reason = event.trigger_reason || "presence_settled";
@@ -9977,23 +9973,24 @@ var index_default = definePluginEntry({
           const shouldWake = shouldWakeAgent(body.type);
           const now = Date.now();
           const dedupeOk = shouldWake && now - lastPresenceSettledAt > 5e3;
+          const agentId = presenceTarget === "main" ? "main" : presenceTarget;
+          const sessionKey = `agent:${agentId}:main`;
+          // Always enqueue the event — dedup only prevents duplicate wakes
+          const systemApi = api.runtime?.system;
+          if (systemApi?.enqueueSystemEvent) {
+            const enqueued = systemApi.enqueueSystemEvent(eventText, {
+              sessionKey,
+              trusted: false
+            });
+            console.info(`[environmental-event] enqueueSystemEvent result: ${enqueued} for ${body.type} (sessionKey=${sessionKey})`);
+          } else {
+            console.warn(`[environmental-event] enqueueSystemEvent not available — event may not reach agent`);
+          }
           if (shouldWake && dedupeOk) {
             lastPresenceSettledAt = now;
-            const agentId = presenceTarget === "main" ? "main" : presenceTarget;
-            const sessionKey = `agent:${agentId}:main`;
-            console.info(`[environmental-event] Routing ${body.type} to agent '${agentId}' via in-process SDK (sessionKey=${sessionKey})`);
+            console.info(`[environmental-event] Routing ${body.type} to agent '${agentId}' (wake + enqueue)`);
             res.statusCode = 200;
-            res.end(JSON.stringify({ status: "received", routedTo: agentId }));
-            const systemApi = api.runtime?.system;
-            if (systemApi?.enqueueSystemEvent) {
-              const enqueued = systemApi.enqueueSystemEvent(eventText, {
-                sessionKey,
-                trusted: false
-              });
-              console.info(`[environmental-event] enqueueSystemEvent result: ${enqueued} (sessionKey=${sessionKey})`);
-            } else {
-              console.warn(`[environmental-event] enqueueSystemEvent not available \u2014 event may not reach agent`);
-            }
+            res.end(JSON.stringify({ status: "received", routedTo: agentId, wake: true }));
             if (systemApi?.runHeartbeatOnce) {
               setTimeout(() => {
                 systemApi.runHeartbeatOnce({
@@ -10008,13 +10005,15 @@ var index_default = definePluginEntry({
                 });
               }, 300);
             } else {
-              console.warn(`[environmental-event] runHeartbeatOnce not available \u2014 agent may not wake immediately`);
+              console.warn(`[environmental-event] runHeartbeatOnce not available — agent may not wake immediately`);
             }
-            return true;
+          } else {
+            // Event enqueued above; no wake needed (deduped or non-wake type)
+            const reason = !shouldWake ? "non-wake type" : "deduped (within 5s)";
+            console.info(`[environmental-event] ${body.type} enqueued without wake (${reason})`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "received", routedTo: agentId, wake: false, reason }));
           }
-          console.info(`[environmental-event] Non-wake event ${body.type} acknowledged`);
-          res.statusCode = 200;
-          res.end(JSON.stringify({ status: "received" }));
           return true;
         }
       });
