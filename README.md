@@ -243,7 +243,9 @@ The plugin receives presence and observation data from Snarling's thermal/enviro
 
 **Wake behavior:** Only `observation_report` and V1 `presence_settled` wake the agent. `presence_change` is acknowledged but doesn't wake. A 5-second dedup window prevents double-wakes from V1/V2 overlap.
 
-**Configuration:** Set `presenceTarget` in plugin config to route events to a specific agent (default: `main`). Events are delivered via `enqueueSystemEvent` + a 300ms-delayed `runHeartbeatOnce` wake.
+**Event delivery:** Wake events are delivered via `subagent.run`, which creates a real agent turn in the target session. This ensures events actually reach the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + a 300ms-delayed `runHeartbeatOnce` (note: this fallback is lossy — events can be silently dropped when the target session is `done`).
+
+**Configuration:** Set `presenceTarget` in plugin config to route events to a specific agent (default: `main`). The session key is constructed as `agent:{presenceTarget}:main`.
 
 **Migration note:** Once Snarling is fully on V2, the V1 compat paths can be removed. During transition, both `observation_report` (V2) and `presence_settled` (V1) will wake the agent for the same semantic event — the dedup window prevents double-waking.
 
@@ -260,26 +262,16 @@ Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HT
 
 This is how environmental events reach the environmental agent instead of the main agent — no hardcoded routing, just a config value.
 
-**Current event types (V1):**
+**Event types (V2, current):**
 
-| Event Type | When | Wake Agent? | Payload |
-|---|---|---|---|
-| `presence_change` | Human arrived or left | No | `present`, `absent_duration` |
-| `presence_settled` | Human present and stable for 60s | Yes | `absent_duration_sec` |
+| Event Type | When | Wake Agent? | Delivery Method | Payload |
+|---|---|---|---|---|
+| `observation_report` | Presence settled, periodic check, or startup | Yes | `subagent.run` (fallback: `enqueueSystemEvent`) | `trigger_reason`, `world_state`, `changes_since_last` |
+| `presence_change` | Human arrived or left | No | `enqueueSystemEvent` only | `present`, `absent_duration` |
 
-**Planned event types (V2):**
+Only `observation_report` events wake the agent via `subagent.run` — this covers both arrivals (`presence_settled`) and periodic check-ins (`scheduled`). `presence_change` events (raw presence flips) are too frequent to warrant waking the agent and are enqueued for the next heartbeat instead.
 
-| Event Type | When | Wake Agent? | Payload |
-|---|---|---|---|
-| `presence_settled` | Human present and stable for 60s | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
-| `observation_report` | Every 30m (active) / 2-4h (inactive) | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
-
-V2 changes to the plugin are minimal:
-- `formatEnvironmentalEvent()` — add `trigger_reason` to output text, handle `observation_report` type
-- `shouldWakeAgent()` — return true for both `presence_settled` and `observation_report`
-- Event payloads now include `world_state` + `changes_since_last` — bridge just stringifies them
-
-No structural changes — same HTTP route, same `enqueueSystemEvent` + `runHeartbeatOnce` flow, same `presenceTarget` routing.
+**Why `subagent.run` instead of `enqueueSystemEvent`:** The old `enqueueSystemEvent` + `runHeartbeatOnce` delivery path silently drops events when the target agent session is in `done` state. `subagent.run` creates a real agent turn that executes regardless of session state, ensuring events are always delivered. This is the same fix applied to the voice bridge for the same bug (#86090).
 
 ## Install from ClawHub
 
