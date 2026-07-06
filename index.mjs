@@ -9975,42 +9975,89 @@ var index_default = definePluginEntry({
           const dedupeOk = shouldWake && now - lastPresenceSettledAt > 5e3;
           const agentId = presenceTarget === "main" ? "main" : presenceTarget;
           const sessionKey = `agent:${agentId}:main`;
-          // Always enqueue the event — dedup only prevents duplicate wakes
           const systemApi = api.runtime?.system;
-          if (systemApi?.enqueueSystemEvent) {
-            const enqueued = systemApi.enqueueSystemEvent(eventText, {
-              sessionKey,
-              trusted: false
-            });
-            console.info(`[environmental-event] enqueueSystemEvent result: ${enqueued} for ${body.type} (sessionKey=${sessionKey})`);
-          } else {
-            console.warn(`[environmental-event] enqueueSystemEvent not available — event may not reach agent`);
-          }
+          const subagent = api.runtime?.subagent;
+          // Primary path: subagent.run (creates a real agent turn)
+          // This fixes the bug where enqueueSystemEvent + runHeartbeatOnce
+          // silently drops events when the session is done/idle.
+          // Voice bridge uses the same pattern successfully.
           if (shouldWake && dedupeOk) {
             lastPresenceSettledAt = now;
-            console.info(`[environmental-event] Routing ${body.type} to agent '${agentId}' (wake + enqueue)`);
             res.statusCode = 200;
             res.end(JSON.stringify({ status: "received", routedTo: agentId, wake: true }));
-            if (systemApi?.runHeartbeatOnce) {
-              setTimeout(() => {
-                systemApi.runHeartbeatOnce({
-                  agentId,
+            if (subagent?.run) {
+              console.info(`[environmental-event] Routing ${body.type} to agent '${agentId}' via subagent.run`);
+              const subagentPrompt = [
+                `[System: Environmental event received]`,
+                ``,
+                eventText,
+                ``,
+                `Full observation data is available at /tmp/latest-observation-report.json`,
+                `Current presence sensor data: http://127.0.0.1:5000/presence`,
+                ``,
+                `Process this event: update presence.db if needed, check cascade state, and respond with HEARTBEAT_OK or hand off to main agent if Snar should be notified.`
+              ].join("\n");
+              try {
+                const result = await subagent.run({
                   sessionKey,
-                  reason: "hook",
-                  heartbeat: { target: "last" }
-                }).then((wakeResult) => {
-                  console.info(`[environmental-event] runHeartbeatOnce result: ${JSON.stringify(wakeResult)} (agentId=${agentId})`);
-                }).catch((wakeErr) => {
-                  console.warn(`[environmental-event] runHeartbeatOnce failed: ${wakeErr instanceof Error ? wakeErr.message : String(wakeErr)}`);
+                  message: subagentPrompt,
+                  lightContext: true
                 });
-              }, 300);
+                const runId = result?.runId ?? "unknown";
+                console.info(`[environmental-event] Subagent spawned: runId=${runId}`);
+                if (subagent.waitForRun) {
+                  try {
+                    const waitResult = await subagent.waitForRun({ runId, timeoutMs: 45e3 });
+                    const status = waitResult?.status ?? "unknown";
+                    console.info(`[environmental-event] Subagent completed: ${status}`);
+                  } catch (we) {
+                    console.warn(`[environmental-event] Subagent wait error: ${we?.message}`);
+                  }
+                }
+              } catch (err) {
+                console.error(`[environmental-event] Subagent.run failed: ${err?.message}, falling back to enqueueSystemEvent`);
+                // Fallback: enqueue + heartbeat wake (old path, known to be lossy)
+                if (systemApi?.enqueueSystemEvent) {
+                  systemApi.enqueueSystemEvent(eventText, { sessionKey, trusted: false });
+                }
+                if (systemApi?.runHeartbeatOnce) {
+                  setTimeout(() => {
+                    systemApi.runHeartbeatOnce({
+                      agentId,
+                      sessionKey,
+                      reason: "hook",
+                      heartbeat: { target: "last" }
+                    }).catch((wakeErr) => {
+                      console.warn(`[environmental-event] runHeartbeatOnce failed: ${wakeErr instanceof Error ? wakeErr.message : String(wakeErr)}`);
+                    });
+                  }, 300);
+                }
+              }
             } else {
-              console.warn(`[environmental-event] runHeartbeatOnce not available — agent may not wake immediately`);
+              console.warn(`[environmental-event] subagent.run not available, falling back to enqueueSystemEvent`);
+              if (systemApi?.enqueueSystemEvent) {
+                systemApi.enqueueSystemEvent(eventText, { sessionKey, trusted: false });
+              }
+              if (systemApi?.runHeartbeatOnce) {
+                setTimeout(() => {
+                  systemApi.runHeartbeatOnce({
+                    agentId,
+                    sessionKey,
+                    reason: "hook",
+                    heartbeat: { target: "last" }
+                  }).catch((wakeErr) => {
+                    console.warn(`[environmental-event] runHeartbeatOnce failed: ${wakeErr instanceof Error ? wakeErr.message : String(wakeErr)}`);
+                  });
+                }, 300);
+              }
             }
           } else {
-            // Event enqueued above; no wake needed (deduped or non-wake type)
+            // Non-wake event type or deduped — just enqueue for next heartbeat
             const reason = !shouldWake ? "non-wake type" : "deduped (within 5s)";
             console.info(`[environmental-event] ${body.type} enqueued without wake (${reason})`);
+            if (systemApi?.enqueueSystemEvent) {
+              systemApi.enqueueSystemEvent(eventText, { sessionKey, trusted: false });
+            }
             res.statusCode = 200;
             res.end(JSON.stringify({ status: "received", routedTo: agentId, wake: false, reason }));
           }
