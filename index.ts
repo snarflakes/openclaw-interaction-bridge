@@ -7,7 +7,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
 // exec import removed — environmental-event handler now uses in-process SDK
-import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats } from "./approval_tool";
+import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats, cleanupOrphanedFlows, getPendingInfo } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
@@ -150,9 +150,29 @@ export default definePluginEntry({
   description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api: any) {
     // State monitoring hooks - track when agent is processing or speaking
+    // Also run periodic orphan TaskFlow cleanup on each agent start
+    let lastOrphanCleanup = 0;
+    const ORPHAN_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // Clean up every 30 minutes
+
     api.on("before_agent_start", (event: any) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
+
+      // Periodic orphan cleanup
+      const now = Date.now();
+      if (now - lastOrphanCleanup > ORPHAN_CLEANUP_INTERVAL_MS) {
+        lastOrphanCleanup = now;
+        const taskFlowApi = api.runtime?.taskFlow;
+        if (taskFlowApi) {
+          cleanupOrphanedFlows(taskFlowApi).then((result) => {
+            if (result.cancelled > 0 || result.errors > 0 || result.details.length > 0) {
+              console.info(`[approval-tool] Orphan cleanup: ${JSON.stringify(result)}`);
+            }
+          }).catch((err: any) => {
+            console.warn(`[approval-tool] Orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+      }
     });
 
     api.on("before_tool_call", (event: any) => {
@@ -354,7 +374,7 @@ export default definePluginEntry({
           // Stats request: send {"action":"stats"} to /approval-callback
           if (body.action === 'stats') {
             res.statusCode = 200;
-            res.end(JSON.stringify({ stats: approvalStats }));
+            res.end(JSON.stringify({ stats: approvalStats, pending: getPendingInfo() }));
             return true;
           }
 

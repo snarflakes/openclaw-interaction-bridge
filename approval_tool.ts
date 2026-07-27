@@ -517,3 +517,167 @@ export async function resumeNotificationFlow(
     pendingNotifications.delete(notificationId);
   }
 }
+
+// Maximum age for a pending flow before it's considered orphaned (2 hours)
+const FLOW_ORPHAN_AGE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Clean up orphaned TaskFlows — flows that are still in "waiting" state
+ * but whose in-memory entries have been lost (plugin restart, gateway restart, etc.).
+ *
+ * This should be called periodically (e.g., on heartbeat or startup) to prevent
+ * accumulation of stuck flows in the gateway's database.
+ *
+ * Returns cleanup stats for logging.
+ */
+export async function cleanupOrphanedFlows(taskFlowApi: any): Promise<{
+  cancelled: number;
+  errors: number;
+  details: string[];
+}> {
+  const result = { cancelled: 0, errors: 0, details: [] as string[] };
+
+  // 1. Clean up in-memory maps — remove entries older than FLOW_ORPHAN_AGE_MS
+  const now = Date.now();
+  let approvalsExpired = 0;
+  for (const [requestId, entry] of pendingApprovals.entries()) {
+    if (now - entry.createdAt > FLOW_ORPHAN_AGE_MS) {
+      pendingApprovals.delete(requestId);
+      approvalsExpired++;
+      if (currentApprovalInProgress === requestId) {
+        currentApprovalInProgress = null;
+        currentApprovalStartedAt = null;
+      }
+    }
+  }
+  if (approvalsExpired > 0) {
+    result.details.push(`Expired ${approvalsExpired} stale approval entry(ies) from in-memory map`);
+  }
+
+  let notificationsExpired = 0;
+  for (const [notificationId, entry] of pendingNotifications.entries()) {
+    if (now - entry.createdAt > FLOW_ORPHAN_AGE_MS) {
+      pendingNotifications.delete(notificationId);
+      notificationsExpired++;
+    }
+  }
+  if (notificationsExpired > 0) {
+    result.details.push(`Expired ${notificationsExpired} stale notification entry(ies) from in-memory map`);
+  }
+
+  // 2. Cancel orphaned TaskFlows in the gateway database
+  //    We can't directly query the DB from a plugin, so we iterate our known flow IDs
+  //    and check which ones are still in "waiting" state past the orphan age.
+  //    For flows NOT in our in-memory maps, we rely on the approval lock timeout.
+  if (!taskFlowApi) {
+    result.details.push('No TaskFlow API available — skipping gateway flow cleanup');
+    return result;
+  }
+
+  // Collect all known flow IDs from in-memory maps that are still valid
+  const knownFlowIds = new Set<string>();
+  for (const entry of pendingApprovals.values()) {
+    knownFlowIds.add(entry.flowId);
+  }
+  for (const entry of pendingNotifications.values()) {
+    knownFlowIds.add(entry.flowId);
+  }
+
+  // Try to cancel flows that are in our maps but past the orphan age
+  // (these were created but never got a callback)
+  const entriesToCheck: Array<{ id: string; flowId: string; type: string; createdAt: number }> = [];
+  for (const [requestId, entry] of pendingApprovals.entries()) {
+    entriesToCheck.push({ id: requestId, flowId: entry.flowId, type: 'approval', createdAt: entry.createdAt });
+  }
+  for (const [notificationId, entry] of pendingNotifications.entries()) {
+    entriesToCheck.push({ id: notificationId, flowId: entry.flowId, type: 'notification', createdAt: entry.createdAt });
+  }
+
+  for (const entry of entriesToCheck) {
+    if (now - entry.createdAt > FLOW_ORPHAN_AGE_MS) {
+      try {
+        const getResult = await taskFlowApi.get(entry.flowId);
+        const flow = getResult?.flow ?? getResult;
+        if (flow && flow.status === 'waiting') {
+          // This flow is stuck — cancel it
+          try {
+            await taskFlowApi.finish({
+              flowId: entry.flowId,
+              expectedRevision: flow.revision,
+              stateJson: {
+                ...flow.stateJson,
+                orphaned: true,
+                cleanedUpAt: now,
+              },
+            });
+            result.cancelled++;
+            result.details.push(`Cancelled orphaned ${entry.type} flow ${entry.flowId} (${entry.id}, age: ${Math.round((now - entry.createdAt) / 60000)}min)`);
+          } catch (finishErr) {
+            // finish might fail if revision mismatch — try cancel instead
+            try {
+              await taskFlowApi.cancel?.(entry.flowId);
+              result.cancelled++;
+              result.details.push(`Cancelled orphaned ${entry.type} flow ${entry.flowId} via cancel()`);
+            } catch (cancelErr: any) {
+              result.errors++;
+              result.details.push(`Failed to cancel orphaned ${entry.type} flow ${entry.flowId}: ${cancelErr?.message || cancelErr}`);
+            }
+          }
+          // Remove from in-memory maps
+          if (entry.type === 'approval') {
+            pendingApprovals.delete(entry.id);
+            if (currentApprovalInProgress === entry.id) {
+              currentApprovalInProgress = null;
+              currentApprovalStartedAt = null;
+            }
+          } else {
+            pendingNotifications.delete(entry.id);
+          }
+        }
+      } catch (getErr: any) {
+        // Flow might not exist anymore — that's fine, just clean up the in-memory entry
+        result.details.push(`Flow ${entry.flowId} not found (already cleaned up), removing in-memory entry`);
+        if (entry.type === 'approval') {
+          pendingApprovals.delete(entry.id);
+        } else {
+          pendingNotifications.delete(entry.id);
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Get diagnostic info about pending approvals and notifications.
+ * Useful for debugging and the /debug/notifications endpoint.
+ */
+export function getPendingInfo(): {
+  currentApproval: string | null;
+  approvalLockAge: string | null;
+  pendingApprovals: Array<{ requestId: string; flowId: string; ageMinutes: number; sessionKey?: string }>;
+  pendingNotifications: Array<{ notificationId: string; flowId: string; ageMinutes: number; sessionKey: string }>;
+  stats: { approvals: typeof approvalStats; notifications: typeof notificationStats };
+} {
+  const now = Date.now();
+  return {
+    currentApproval: currentApprovalInProgress,
+    approvalLockAge: currentApprovalStartedAt
+      ? `${Math.round((now - currentApprovalStartedAt) / 60000)}min`
+      : null,
+    pendingApprovals: [...pendingApprovals.entries()].map(([id, entry]) => ({
+      requestId: id,
+      flowId: entry.flowId,
+      ageMinutes: Math.round((now - entry.createdAt) / 60000),
+      sessionKey: entry.sessionKey,
+    })),
+    pendingNotifications: [...pendingNotifications.entries()].map(([id, entry]) => ({
+      notificationId: id,
+      flowId: entry.flowId,
+      ageMinutes: Math.round((now - entry.createdAt) / 60000),
+      sessionKey: entry.sessionKey,
+    })),
+    stats: { approvals: approvalStats, notifications: notificationStats },
+  };
+}
