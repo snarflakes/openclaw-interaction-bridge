@@ -9257,14 +9257,9 @@ async function resumeApprovalFlow(requestId, approved, taskFlowApi, systemApi, s
     } else {
       approvalStats.rejected++;
     }
-    try {
-      systemApi.enqueueSystemEvent(
-        `User approval response: ${approvalResult}. ${approved ? "Proceeding with the action." : "Action cancelled by user."} (request: ${requestId})`,
-        { sessionKey }
-      );
-    } catch (wakeErr) {
-      console.error(`[approval-tool] Warning: failed to enqueue system event: ${wakeErr}`);
-    }
+    // Delivery is handled by the callback handler via subagent.run,
+    // not by resumeApprovalFlow. enqueueSystemEvent removed to avoid
+    // duplicate delivery (subagent.run is the primary path now).
     return { success: true, message: `Approval ${approved ? "APPROVED" : "REJECTED"} for ${requestId}` };
   } finally {
     pendingApprovals.delete(requestId);
@@ -9742,11 +9737,8 @@ var index_default = definePluginEntry({
               request_id,
               approved === true,
               boundTaskFlow,
-              // Pass minimal systemApi — just enqueueSystemEvent
-              // Wake will happen AFTER HTTP response is sent
-              { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {
-              }), requestHeartbeatNow: () => {
-              }, runHeartbeatOnce: void 0 },
+              // Pass stub systemApi — delivery via subagent.run below
+              { enqueueSystemEvent: () => {}, requestHeartbeatNow: () => {}, runHeartbeatOnce: void 0 },
               sessionKey
             );
             forceClearApprovalLock(request_id);
@@ -9758,34 +9750,48 @@ var index_default = definePluginEntry({
               res.end(JSON.stringify({ error: result.message, request_id }));
             }
             setImmediate(() => {
-              try {
-                const wakeReason = "hook:approval";
-                if (systemApi?.requestHeartbeatNow) {
-                  systemApi.requestHeartbeatNow({
-                    reason: wakeReason,
-                    sessionKey,
-                    coalesceMs: 100
-                  });
+              // Primary delivery: subagent.run (same pattern as voice bridge)
+              // Creates a real agent turn regardless of session state.
+              // Fixes the bug where enqueueSystemEvent + wake silently drops
+              // the result when the session is done/idle (#86090).
+              const subagent = api.runtime?.subagent;
+              if (subagent?.run) {
+                const approvalText = approved
+                  ? `User approval response: APPROVED. Proceeding with the action. (request: ${request_id})`
+                  : `User approval response: REJECTED. Action cancelled by user. (request: ${request_id})`;
+                console.info(`[approval-callback] Delivering approval via subagent.run to ${sessionKey}`);
+                subagent.run({
+                  sessionKey,
+                  message: approvalText,
+                  lightContext: true
+                }).then((runResult) => {
+                  const runId = runResult?.runId ?? "unknown";
+                  console.info(`[approval-callback] Subagent spawned: runId=${runId}`);
+                  if (subagent.waitForRun) {
+                    return subagent.waitForRun({ runId, timeoutMs: 45000 });
+                  }
+                }).then((waitResult) => {
+                  console.info(`[approval-callback] Subagent completed: status=${waitResult?.status ?? "unknown"}`);
+                }).catch((err) => {
+                  console.error(`[approval-callback] Subagent error: ${err?.message || err}`);
+                });
+              } else {
+                // Fallback: enqueueSystemEvent + wake (lossy when session is done)
+                console.warn(`[approval-callback] subagent.run not available, falling back to enqueueSystemEvent`);
+                const systemApi = api.runtime?.system;
+                if (systemApi?.enqueueSystemEvent) {
+                  systemApi.enqueueSystemEvent(
+                    `User approval response: ${approved ? "APPROVED" : "REJECTED"}. ${approved ? "Proceeding with the action." : "Action cancelled by user."} (request: ${request_id})`,
+                    { sessionKey }
+                  );
                 }
                 if (systemApi?.runHeartbeatOnce) {
                   systemApi.runHeartbeatOnce({
                     sessionKey,
-                    reason: wakeReason,
+                    reason: "hook:approval",
                     heartbeat: { target: "last" }
-                  }).catch(() => {
-                  });
+                  }).catch(() => {});
                 }
-                setTimeout(() => {
-                  try {
-                    systemApi.requestHeartbeatNow?.({
-                      reason: wakeReason,
-                      sessionKey,
-                      coalesceMs: 0
-                    });
-                  } catch (_e) {
-                  }
-                }, 500);
-              } catch (_wakeErr) {
               }
             });
           } catch (error2) {

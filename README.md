@@ -90,8 +90,10 @@ When the agent calls `request_user_approval`:
 3. Snarling displays the request on screen with A/B button prompt
 4. User presses A (approve) or B (reject)
 5. Snarling forwards the decision to the plugin's `/approval-callback` HTTP route
-6. Plugin resumes the TaskFlow and enqueues a system event to wake the agent
+6. Plugin resumes the TaskFlow (bookkeeping: `resume` → `finish`) and delivers the result to the agent via `subagent.run`
 7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+
+**Delivery:** The approval result is delivered to the agent via `subagent.run`, which creates a real agent turn in the target session. This ensures the result reaches the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + `runHeartbeatOnce` (note: this fallback is lossy — results can be silently dropped when the target session is `done`).
 
 Only one approval at a time — subsequent requests are blocked until the current one is resolved (with a 30-minute stale timeout as a safety net).
 
@@ -104,8 +106,9 @@ When the agent calls `send_notification`:
 3. Snarling displays the notification on screen with priority-based face and banner behavior
 4. User interacts: A press reveals text, B press dismisses, or low-priority auto-dismisses after timeout
 5. Snarling forwards feedback (revealed/dismissed/timed out + timing) to the plugin's `/notification-callback` HTTP route
-6. Plugin resumes the TaskFlow and enqueues a system event to wake the agent
-7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+6. Plugin resumes the TaskFlow (bookkeeping) and delivers feedback to the agent
+
+**Delivery:** Notification feedback is currently delivered via `enqueueSystemEvent` + `runHeartbeatOnce`. This means feedback may be delayed until the next heartbeat if the agent session is `done` at the time of delivery. A future update will switch this to `subagent.run` for reliable delivery (same as approvals and environmental events).
 
 If TaskFlow is unavailable, the notification degrades to fire-and-forget (no feedback).
 
@@ -212,6 +215,18 @@ Snarling Display (Python service on port 5000)
 
 No approval_server middleman — the plugin talks directly to Snarling. Snarling resolves approvals and notifications via its A/B buttons and POSTs the result back to the gateway.
 
+### Delivery Methods
+
+The plugin uses two delivery methods for getting data back to the agent, depending on the flow:
+
+| Flow | Primary Delivery | Fallback | Reliable? |
+|---|---|---|---|
+| **Approvals** | `subagent.run` | `enqueueSystemEvent` + `runHeartbeatOnce` | ✅ Yes |
+| **Environmental events** | `subagent.run` | `enqueueSystemEvent` + `runHeartbeatOnce` | ✅ Yes |
+| **Notifications** | `enqueueSystemEvent` + `runHeartbeatOnce` | None | ⚠️ Delayed if session is `done` |
+
+**Why `subagent.run`:** The old `enqueueSystemEvent` + `runHeartbeatOnce` delivery path silently drops events when the target agent session is in `done` state (the session has no active turn to drain the event queue). `subagent.run` creates a real agent turn that executes regardless of session state, ensuring events are always delivered. This fix was applied to approvals and environmental events; notifications will be migrated in a future update.
+
 ### Environmental Events (V2 Protocol)
 
 The plugin receives presence and observation data from Snarling's thermal/environmental system via a `POST /environmental-event` route. This replaces the old V1 event types (`presence_change`, `presence_settled`) with a unified `observation_report` type.
@@ -243,7 +258,7 @@ The plugin receives presence and observation data from Snarling's thermal/enviro
 
 **Wake behavior:** Only `observation_report` and V1 `presence_settled` wake the agent. `presence_change` is acknowledged but doesn't wake. A 5-second dedup window prevents double-wakes from V1/V2 overlap.
 
-**Event delivery:** Wake events are delivered via `subagent.run`, which creates a real agent turn in the target session. This ensures events actually reach the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + a 300ms-delayed `runHeartbeatOnce` (note: this fallback is lossy — events can be silently dropped when the target session is `done`).
+**Event delivery:** Wake events are delivered via `subagent.run`, which creates a real agent turn in the target session. This ensures events actually reach the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + a 300ms-delayed `runHeartbeatOnce` (note: this fallback is lossy — events can be silently dropped when the target session is `done`). This is the same delivery method used for approval callbacks.
 
 **Configuration:** Set `presenceTarget` in plugin config to route events to a specific agent (default: `main`). The session key is constructed as `agent:{presenceTarget}:main`.
 
