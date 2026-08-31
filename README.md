@@ -1,6 +1,29 @@
-# OpenClaw Interaction Bridge
+# OpenClaw Interaction Bridge — OpenClaw 2.0 Compatible
 
 A plugin that bridges OpenClaw agent activity to any external program! [Snarling](https://github.com/snarflakes/snarling) for example — a Raspberry Pi + DisplayHAT Mini companion that shows what the agent is doing and lets you approve or reject actions with physical A/B buttons and lets agents send notifications with a feedback loop for attunement!
+
+## OpenClaw 2.0 Compatibility (2026.8+)
+
+OpenClaw 2026.8.1 restructured the plugin runtime API. Key changes:
+
+- **`api.runtime.taskFlow`** moved to **`api.runtime.tasks.managedFlows`** — the TaskFlow API (with `bindSession` and `fromToolContext`) is now nested under `api.runtime.tasks` alongside `flows` and `runs`.
+- **Plugin runtime keys** in 2026.8+: `version`, `gateway`, `config`, `agent`, `subagent`, `system`, `media`, `mediaUnderstanding`, `tts`, `channel`, `events`, `logging`, `state`, `modelAuth`, `imageGeneration`, `videoGeneration`, `musicGeneration`, `llm`, `tasks`.
+
+The plugin uses a backwards-compatible priority chain so it works on both old and new versions:
+```javascript
+api.runtime?.tasks?.managedFlows ?? api.runtime?.managedFlows ?? api.runtime?.taskFlow
+```
+
+### General Methodology for OpenClaw 2.0 Plugin Updates
+
+When OpenClaw major versions change, plugin APIs may shift. Here's the diagnostic approach:
+
+1. **Check `api.runtime` keys** — Add `console.info` logging to dump `Object.keys(api.runtime)` from inside `register(api)`. This reveals the actual runtime surface available to plugins.
+2. **Check the type definitions** — The canonical types are in `dist/plugin-entry-*.d.ts` under the OpenClaw install (`~/.npm-global/lib/node_modules/openclaw/dist/`). Look at `PluginRuntime` and `PluginRuntimeCore` for the full API.
+3. **Check `dist/runtime-CbG1wF9O2.js`** (or similar) for the actual runtime implementation — search for `createRuntime` and `createPluginRuntime` to see what's constructed.
+4. **Use `??` fallback chains** — Always try the new API path first, falling back to older paths. This lets one build work across versions.
+5. **Run `openclaw doctor`** after upgrades — It catches config issues like missing plugin allowlists.
+6. **SIGUSR1 only hot-reloads config** — Plugin JS changes require a full `openclaw gateway restart`.
 
 ## ⚠️ Optional Config (OpenClaw 2026.4.26+)
 

@@ -9560,12 +9560,12 @@ var index_default = definePluginEntry({
           }
           let taskFlow = null;
           try {
-            taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
+            taskFlow = api.runtime?.tasks?.managedFlows?.fromToolContext?.(ctx) ?? api.runtime?.managedFlows?.fromToolContext?.(ctx) ?? api.runtime?.taskFlow?.fromToolContext?.(ctx);
           } catch (e) {
             console.warn(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
           }
           if (!taskFlow) {
-            const taskFlowApi = api.runtime?.taskFlow;
+            const taskFlowApi = api.runtime?.tasks?.managedFlows ?? api.runtime?.managedFlows ?? api.runtime?.taskFlow;
             if (taskFlowApi?.bindSession) {
               console.info(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
               taskFlow = taskFlowApi.bindSession({
@@ -9614,12 +9614,12 @@ var index_default = definePluginEntry({
           if (sessionKey) {
             let taskFlow = null;
             try {
-              taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
+              taskFlow = api.runtime?.tasks?.managedFlows?.fromToolContext?.(ctx) ?? api.runtime?.managedFlows?.fromToolContext?.(ctx) ?? api.runtime?.taskFlow?.fromToolContext?.(ctx);
             } catch (e) {
               console.warn(`[notification-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
             }
             if (!taskFlow) {
-              const taskFlowApi = api.runtime?.taskFlow;
+              const taskFlowApi = api.runtime?.tasks?.managedFlows ?? api.runtime?.managedFlows ?? api.runtime?.taskFlow;
               if (taskFlowApi?.bindSession) {
                 console.info(`[notification-tool] Using bindSession with sessionKey=${sessionKey}`);
                 taskFlow = taskFlowApi.bindSession({
@@ -9718,7 +9718,7 @@ var index_default = definePluginEntry({
             return true;
           }
           console.info(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
-          const taskFlowApi = api.runtime?.taskFlow;
+          const taskFlowApi = api.runtime?.tasks?.managedFlows ?? api.runtime?.managedFlows ?? api.runtime?.taskFlow;
           if (!taskFlowApi) {
             res.statusCode = 500;
             res.end(JSON.stringify({ error: "TaskFlow API not available", request_id }));
@@ -9851,7 +9851,7 @@ var index_default = definePluginEntry({
             return true;
           }
           console.info(`[notification-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
-          const taskFlowApi = api.runtime?.taskFlow;
+          const taskFlowApi = api.runtime?.tasks?.managedFlows ?? api.runtime?.managedFlows ?? api.runtime?.taskFlow;
           if (!taskFlowApi) {
             res.statusCode = 500;
             res.end(JSON.stringify({ error: "TaskFlow API not available", notification_id }));
