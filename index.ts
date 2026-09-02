@@ -17,6 +17,9 @@ const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUI
 //
 // presenceTarget config: routes presence events to a specific agent (default: 'main')
 // Set via plugins.entries.openclaw-interaction-bridge-v2.config.presenceTarget
+// Set to 'disabled' to disable event routing entirely
+// environmentalEventsEnabled config: controls whether the /environmental-event route is registered
+// Default: true. Set to false to completely disable environmental event processing.
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const PROCESSING_IDLE_DELAY_MS = 10000; // 10s — same as communicating, simple uniform timeout
 const COMMUNICATING_IDLE_DELAY_MS = 10000; // 10s — reply is near-instant, shorter timeout
@@ -663,6 +666,9 @@ export default definePluginEntry({
       console.info("[openclaw-interaction-bridge] Registered /notification-callback route");
 
       // Register environmental event route (exact match)
+      // Only register if environmentalEventsEnabled is not explicitly false
+      const envEventsEnabled = api.pluginConfig?.environmentalEventsEnabled !== false; // default true
+      if (envEventsEnabled) {
       api.registerHttpRoute({
         method: "POST",
         path: "/environmental-event",
@@ -691,10 +697,25 @@ export default definePluginEntry({
 
           console.info(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
 
-          // Read presenceTarget from plugin config (default: 'main')
-          const presenceTarget = api.pluginConfig?.presenceTarget || 'main';
+          // Check if environmental events are disabled via config
+          const envEventsEnabled = api.pluginConfig?.environmentalEventsEnabled !== false; // default true
+          if (!envEventsEnabled) {
+            console.info(`[environmental-event] Environmental events disabled via config, skipping`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "disabled", reason: "environmentalEventsEnabled=false" }));
+            return true;
+          }
 
-          // Build event text for system event enqueue
+          // Read presenceTarget from plugin config (default: 'main')
+          // 'disabled' means don't route events to any agent
+          const presenceTarget = api.pluginConfig?.presenceTarget || 'main';
+          if (presenceTarget === 'disabled') {
+            console.info(`[environmental-event] presenceTarget is 'disabled', acknowledging but not routing`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "received", routedTo: "disabled" }));
+            return true;
+          }
+
           const eventText = formatEnvironmentalEvent(body);
 
           // Determine if this event type should trigger an immediate wake
@@ -762,6 +783,9 @@ export default definePluginEntry({
       });
 
       console.info("[openclaw-interaction-bridge] Registered /environmental-event route");
+      } else {
+        console.info("[openclaw-interaction-bridge] Environmental events disabled via config, skipping /environmental-event route registration");
+      }
     }
   }
 });
