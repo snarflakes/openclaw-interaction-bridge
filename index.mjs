@@ -9892,67 +9892,6 @@ var index_default = definePluginEntry({
               res.statusCode = 404;
               res.end(JSON.stringify({ error: result.message, notification_id }));
             }
-            setImmediate(async () => {
-              try {
-                const wakeReason = "hook:notification_feedback";
-                if (systemApi?.requestHeartbeatNow) {
-                  systemApi.requestHeartbeatNow({
-                    reason: wakeReason,
-                    sessionKey,
-                    coalesceMs: 100
-                  });
-                }
-                if (systemApi?.runHeartbeatOnce) {
-                  systemApi.runHeartbeatOnce({
-                    sessionKey,
-                    reason: wakeReason,
-                    heartbeat: { target: "last" }
-                  }).catch(() => {
-                  });
-                }
-                setTimeout(() => {
-                  try {
-                    systemApi.requestHeartbeatNow?.({
-                      reason: wakeReason,
-                      sessionKey,
-                      coalesceMs: 0
-                    });
-                  } catch (_e) {
-                  }
-                }, 500);
-                try {
-                  const hooksToken = process.env.OPENCLAW_HOOKS_TOKEN || "voicebridge-local-hooks-secret";
-                  const hooksUrl = `http://127.0.0.1:${process.env.OPENCLAW_PORT || 18789}/hooks/wake`;
-                  const http = await import("http");
-                  const postData = JSON.stringify({ text: `Notification feedback received: ${notification_id}`, mode: "now" });
-                  const wakeReq = http.request(hooksUrl, {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "Authorization": `Bearer ${hooksToken}`,
-                      "Content-Length": Buffer.byteLength(postData)
-                    },
-                    timeout: 3e3
-                  }, (wakeRes) => {
-                    let data = "";
-                    wakeRes.on("data", (chunk) => {
-                      data += chunk;
-                    });
-                    wakeRes.on("end", () => {
-                      console.info(`[notification-callback] /hooks/wake fallback response: ${wakeRes.statusCode} ${data}`);
-                    });
-                  });
-                  wakeReq.on("error", (e) => {
-                    console.warn(`[notification-callback] /hooks/wake fallback failed: ${e.message}`);
-                  });
-                  wakeReq.write(postData);
-                  wakeReq.end();
-                } catch (_wakeFallbackErr) {
-                  console.warn(`[notification-callback] /hooks/wake fallback error: ${_wakeFallbackErr}`);
-                }
-              } catch (_wakeErr) {
-              }
-            });
           } catch (error2) {
             console.error(`[notification-callback] Error: ${error2}`);
             res.statusCode = 500;

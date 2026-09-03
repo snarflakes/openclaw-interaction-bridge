@@ -601,69 +601,6 @@ export default definePluginEntry({
               res.end(JSON.stringify({ error: result.message, notification_id }));
             }
 
-            // Schedule wake on NEXT event loop tick
-            setImmediate(async () => {
-              try {
-                const wakeReason = "hook:notification_feedback";
-                if (systemApi?.requestHeartbeatNow) {
-                  systemApi.requestHeartbeatNow({
-                    reason: wakeReason,
-                    sessionKey,
-                    coalesceMs: 100
-                  });
-                }
-                if (systemApi?.runHeartbeatOnce) {
-                  systemApi.runHeartbeatOnce({
-                    sessionKey,
-                    reason: wakeReason,
-                    heartbeat: { target: "last" }
-                  }).catch(() => {});
-                }
-                // Second wake attempt after a short delay
-                setTimeout(() => {
-                  try {
-                    systemApi.requestHeartbeatNow?.({
-                      reason: wakeReason,
-                      sessionKey,
-                      coalesceMs: 0
-                    });
-                  } catch (_e) {}
-                }, 500);
-
-                // Reliable fallback: POST to /hooks/wake to trigger heartbeat
-                // Plugin runtime APIs may silently no-op, but /hooks/wake always enqueues + requests heartbeat
-                try {
-                  const hooksToken = process.env.OPENCLAW_HOOKS_TOKEN || "voicebridge-local-hooks-secret";
-                  const hooksUrl = `http://127.0.0.1:${process.env.OPENCLAW_PORT || 18789}/hooks/wake`;
-                  const http = await import("http");
-                  const postData = JSON.stringify({ text: `Notification feedback received: ${notification_id}`, mode: "now" });
-                  const wakeReq = http.request(hooksUrl, {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "Authorization": `Bearer ${hooksToken}`,
-                      "Content-Length": Buffer.byteLength(postData),
-                    },
-                    timeout: 3000,
-                  }, (wakeRes: any) => {
-                    let data = "";
-                    wakeRes.on("data", (chunk: any) => { data += chunk; });
-                    wakeRes.on("end", () => {
-                      console.info(`[notification-callback] /hooks/wake fallback response: ${wakeRes.statusCode} ${data}`);
-                    });
-                  });
-                  wakeReq.on("error", (e: any) => {
-                    console.warn(`[notification-callback] /hooks/wake fallback failed: ${e.message}`);
-                  });
-                  wakeReq.write(postData);
-                  wakeReq.end();
-                } catch (_wakeFallbackErr) {
-                  console.warn(`[notification-callback] /hooks/wake fallback error: ${_wakeFallbackErr}`);
-                }
-              } catch (_wakeErr) {
-                // Wake best-effort
-              }
-            });
           } catch (error) {
             console.error(`[notification-callback] Error: ${error}`);
             res.statusCode = 500;
