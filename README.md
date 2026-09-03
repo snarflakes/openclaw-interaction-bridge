@@ -131,7 +131,7 @@ When the agent calls `send_notification`:
 5. Snarling forwards feedback (revealed/dismissed/timed out + timing) to the plugin's `/notification-callback` HTTP route
 6. Plugin resumes the TaskFlow (bookkeeping) and delivers feedback to the agent
 
-**Delivery:** Notification feedback is currently delivered via `enqueueSystemEvent` + `runHeartbeatOnce`. This means feedback may be delayed until the next heartbeat if the agent session is `done` at the time of delivery. A future update will switch this to `subagent.run` for reliable delivery (same as approvals and environmental events).
+**Delivery:** Notification feedback is recorded in the TaskFlow state (resume → finish) and delivered as context on the agent's next turn. Notifications are informational — they do **not** wake the agent. If the agent is in an active conversation, the feedback appears as context; otherwise it's stored in the completed TaskFlow for later retrieval. This is intentional: notifications don't require immediate agent action, unlike approvals.
 
 If TaskFlow is unavailable, the notification degrades to fire-and-forget (no feedback).
 
@@ -283,7 +283,49 @@ The plugin receives presence and observation data from Snarling's thermal/enviro
 
 **Event delivery:** Wake events are delivered via `subagent.run`, which creates a real agent turn in the target session. This ensures events actually reach the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + a 300ms-delayed `runHeartbeatOnce` (note: this fallback is lossy — events can be silently dropped when the target session is `done`). This is the same delivery method used for approval callbacks.
 
-**Configuration:** Set `presenceTarget` in plugin config to route events to a specific agent (default: `main`). The session key is constructed as `agent:{presenceTarget}:main`.
+**Configuration:** Set `presenceTarget` in plugin config to route events to a specific agent (default: `main`). Set to `disabled` to acknowledge events but not route them to any agent. The session key is constructed as `agent:{presenceTarget}:main`.
+
+### Reducing Agent Wake-ups (Data Kill Switches)
+
+Two plugin config options let you reduce OpenClaw CPU usage by controlling how much thermal/environmental data flows through the system:
+
+| Config Key | Type | Default | Effect |
+|---|---|---|---|
+| `environmentalEventsEnabled` | boolean | `true` | When `false`, the `/environmental-event` HTTP route returns `{status: "disabled"}` immediately — no event processing, no agent wake calls, no observation reports. The route still exists (returns 200) so Snarling doesn't error. |
+| `presenceTarget` | string | `"main"` | Set to `"disabled"` to acknowledge events but skip agent routing — the event is logged but no agent session is woken. Lighter touch than disabling entirely; useful when you want Snarling to keep running but don't need the agent to react to presence changes. |
+
+```json
+// Disable environmental events entirely — maximum CPU savings on OpenClaw
+{
+  "openclaw-interaction-bridge-v2": {
+    "enabled": true,
+    "config": {
+      "environmentalEventsEnabled": false
+    }
+  }
+}
+
+// Or: keep the endpoint active but stop routing to any agent
+{
+  "openclaw-interaction-bridge-v2": {
+    "enabled": true,
+    "config": {
+      "presenceTarget": "disabled"
+    }
+  }
+}
+```
+
+Both switches are safe in any combination. Snarling's `ENVIRONMENTAL_EVENTS_ENABLED` flag (in `snarling.py`) is a separate gate on the sending side — when `False`, Snarling skips the HTTP POST entirely. The two layers work independently:
+
+| Snarling `ENVIRONMENTAL_EVENTS_ENABLED` | Bridge `environmentalEventsEnabled` | Bridge `presenceTarget` | Result |
+|---|---|---|---|
+| `True` | `true` (default) | `"main"` (default) | Normal flow |
+| `True` | `true` | `"disabled"` | Events received but not routed |
+| `True` | `false` | any | Events rejected at bridge |
+| `False` | any | any | No events sent from Snarling |
+
+These are **not** tied to the Snarling thermal camera Hz or display settings. They only control the data pipeline from Snarling → OpenClaw bridge → agent.
 
 **Migration note:** Once Snarling is fully on V2, the V1 compat paths can be removed. During transition, both `observation_report` (V2) and `presence_settled` (V1) will wake the agent for the same semantic event — the dedup window prevents double-waking.
 
@@ -291,7 +333,7 @@ The plugin receives presence and observation data from Snarling's thermal/enviro
 
 Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HTTP route. The plugin formats them into system events and routes them to the **configured target agent** (default: `main`, configurable via `presenceTarget` plugin config).
 
-**Event routing:** The bridge reads `presenceTarget` from plugin config. If set to `environmental`, events route to `agent:environmental:main` — the dedicated environmental agent session. If unset or `main`, events route to the main agent session.
+**Event routing:** The bridge reads `presenceTarget` from plugin config. If set to `environmental`, events route to `agent:environmental:main` — the dedicated environmental agent session. If set to `disabled`, events are acknowledged but not routed to any agent. If unset or `main`, events route to the main agent session.
 
 ```json
 // Plugin config example
