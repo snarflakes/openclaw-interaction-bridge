@@ -9830,13 +9830,23 @@ var index_default = definePluginEntry({
             res.end(JSON.stringify({ stats: notificationStats }));
             return true;
           }
-          const { notification_id, revealed, time_to_reveal_sec, dismissed, timed_out, secret, sessionKey: bodySessionKey } = body;
+          const { notification_id, action, time_to_reveal_sec, secret, sessionKey: bodySessionKey } = body;
+
+          // Map action-based format from snarling to revealed/dismissed/timed_out booleans
+          let revealed = body.revealed ?? null;
+          let dismissed = body.dismissed ?? null;
+          let timed_out = body.timed_out ?? undefined;
+          if (action) {
+            if (action === 'accepted') { revealed = true; dismissed = false; timed_out = false; }
+            else if (action === 'rejected') { revealed = true; dismissed = true; timed_out = false; }
+            else if (action === 'timed_out') { revealed = false; dismissed = false; timed_out = true; }
+          }
           if (!notification_id) {
             res.statusCode = 400;
             res.end(JSON.stringify({ error: "Missing notification_id" }));
             return true;
           }
-          console.info(`[notification-callback] Received: notification_id=${notification_id}, revealed=${revealed}, dismissed=${dismissed}`);
+          console.info(`[notification-callback] Received: notification_id=${notification_id}, action=${action ?? 'N/A'}, revealed=${revealed}, dismissed=${dismissed}`);
           if (secret !== APPROVAL_SECRET) {
             console.warn(`[notification-callback] Invalid secret for notification ${notification_id}`);
             res.statusCode = 403;
