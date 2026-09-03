@@ -9974,7 +9974,22 @@ var index_default = definePluginEntry({
             return true;
           }
           console.info(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
+          // Check if environmental events are disabled via config
+          const envEventsEnabled = api.pluginConfig?.environmentalEventsEnabled !== false;
+          if (!envEventsEnabled) {
+            console.info(`[environmental-event] Environmental events disabled via config, skipping`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "disabled", reason: "environmentalEventsEnabled=false" }));
+            return true;
+          }
+          // 'disabled' means don't route events to any agent
           const presenceTarget = api.pluginConfig?.presenceTarget || "main";
+          if (presenceTarget === "disabled") {
+            console.info(`[environmental-event] presenceTarget is 'disabled', acknowledging but not routing`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "received", routedTo: "disabled" }));
+            return true;
+          }
           const eventText = formatEnvironmentalEvent(body);
           const shouldWake = shouldWakeAgent(body.type);
           const now = Date.now();
