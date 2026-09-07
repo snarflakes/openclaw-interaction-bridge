@@ -16,8 +16,13 @@
     "properties": {
       "presenceTarget": {
         "type": "string",
-        "description": "Agent ID to route presence_settled/presence_change events to. Default: 'main' (current behavior). Set to 'environmental' to route to the environmental agent.",
+        "description": "Agent ID to route presence_settled/presence_change events to. Default: 'main' (current behavior). Set to 'environmental' to route to the environmental agent. Set to 'disabled' to disable event routing entirely.",
         "default": "main"
+      },
+      "environmentalEventsEnabled": {
+        "type": "boolean",
+        "description": "Whether to register the /environmental-event HTTP route and process incoming environmental/thermal events. Default: true. Set to false to completely disable environmental event processing (no route registered, no agent wake calls, no observation reports).",
+        "default": true
       }
     }
   }

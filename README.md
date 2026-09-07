@@ -1,6 +1,29 @@
-# OpenClaw Interaction Bridge
+# OpenClaw Interaction Bridge — OpenClaw 2.0 Compatible
 
 A plugin that bridges OpenClaw agent activity to any external program! [Snarling](https://github.com/snarflakes/snarling) for example — a Raspberry Pi + DisplayHAT Mini companion that shows what the agent is doing and lets you approve or reject actions with physical A/B buttons and lets agents send notifications with a feedback loop for attunement!
+
+## OpenClaw 2.0 Compatibility (2026.8+)
+
+OpenClaw 2026.8.1 restructured the plugin runtime API. Key changes:
+
+- **`api.runtime.taskFlow`** moved to **`api.runtime.tasks.managedFlows`** — the TaskFlow API (with `bindSession` and `fromToolContext`) is now nested under `api.runtime.tasks` alongside `flows` and `runs`.
+- **Plugin runtime keys** in 2026.8+: `version`, `gateway`, `config`, `agent`, `subagent`, `system`, `media`, `mediaUnderstanding`, `tts`, `channel`, `events`, `logging`, `state`, `modelAuth`, `imageGeneration`, `videoGeneration`, `musicGeneration`, `llm`, `tasks`.
+
+The plugin uses a backwards-compatible priority chain so it works on both old and new versions:
+```javascript
+api.runtime?.tasks?.managedFlows ?? api.runtime?.managedFlows ?? api.runtime?.taskFlow
+```
+
+### General Methodology for OpenClaw 2.0 Plugin Updates
+
+When OpenClaw major versions change, plugin APIs may shift. Here's the diagnostic approach:
+
+1. **Check `api.runtime` keys** — Add `console.info` logging to dump `Object.keys(api.runtime)` from inside `register(api)`. This reveals the actual runtime surface available to plugins.
+2. **Check the type definitions** — The canonical types are in `dist/plugin-entry-*.d.ts` under the OpenClaw install (`~/.npm-global/lib/node_modules/openclaw/dist/`). Look at `PluginRuntime` and `PluginRuntimeCore` for the full API.
+3. **Check `dist/runtime-CbG1wF9O2.js`** (or similar) for the actual runtime implementation — search for `createRuntime` and `createPluginRuntime` to see what's constructed.
+4. **Use `??` fallback chains** — Always try the new API path first, falling back to older paths. This lets one build work across versions.
+5. **Run `openclaw doctor`** after upgrades — It catches config issues like missing plugin allowlists.
+6. **SIGUSR1 only hot-reloads config** — Plugin JS changes require a full `openclaw gateway restart`.
 
 ## ⚠️ Optional Config (OpenClaw 2026.4.26+)
 
@@ -90,8 +113,10 @@ When the agent calls `request_user_approval`:
 3. Snarling displays the request on screen with A/B button prompt
 4. User presses A (approve) or B (reject)
 5. Snarling forwards the decision to the plugin's `/approval-callback` HTTP route
-6. Plugin resumes the TaskFlow and enqueues a system event to wake the agent
+6. Plugin resumes the TaskFlow (bookkeeping: `resume` → `finish`) and delivers the result to the agent via `subagent.run`
 7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+
+**Delivery:** The approval result is delivered to the agent via `subagent.run`, which creates a real agent turn in the target session. This ensures the result reaches the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + `runHeartbeatOnce` (note: this fallback is lossy — results can be silently dropped when the target session is `done`).
 
 Only one approval at a time — subsequent requests are blocked until the current one is resolved (with a 30-minute stale timeout as a safety net).
 
@@ -104,8 +129,9 @@ When the agent calls `send_notification`:
 3. Snarling displays the notification on screen with priority-based face and banner behavior
 4. User interacts: A press reveals text, B press dismisses, or low-priority auto-dismisses after timeout
 5. Snarling forwards feedback (revealed/dismissed/timed out + timing) to the plugin's `/notification-callback` HTTP route
-6. Plugin resumes the TaskFlow and enqueues a system event to wake the agent
-7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+6. Plugin resumes the TaskFlow (bookkeeping) and delivers feedback to the agent
+
+**Delivery:** Notification feedback is recorded in the TaskFlow state (resume → finish) and delivered as context on the agent's next turn. Notifications are informational — they do **not** wake the agent. If the agent is in an active conversation, the feedback appears as context; otherwise it's stored in the completed TaskFlow for later retrieval. This is intentional: notifications don't require immediate agent action, unlike approvals.
 
 If TaskFlow is unavailable, the notification degrades to fire-and-forget (no feedback).
 
@@ -212,11 +238,102 @@ Snarling Display (Python service on port 5000)
 
 No approval_server middleman — the plugin talks directly to Snarling. Snarling resolves approvals and notifications via its A/B buttons and POSTs the result back to the gateway.
 
+### Delivery Methods
+
+The plugin uses two delivery methods for getting data back to the agent, depending on the flow:
+
+| Flow | Primary Delivery | Fallback | Reliable? |
+|---|---|---|---|
+| **Approvals** | `subagent.run` | `enqueueSystemEvent` + `runHeartbeatOnce` | ✅ Yes |
+| **Environmental events** | `subagent.run` | `enqueueSystemEvent` + `runHeartbeatOnce` | ✅ Yes |
+| **Notifications** | `enqueueSystemEvent` + `runHeartbeatOnce` | None | ⚠️ Delayed if session is `done` |
+
+**Why `subagent.run`:** The old `enqueueSystemEvent` + `runHeartbeatOnce` delivery path silently drops events when the target agent session is in `done` state (the session has no active turn to drain the event queue). `subagent.run` creates a real agent turn that executes regardless of session state, ensuring events are always delivered. This fix was applied to approvals and environmental events; notifications will be migrated in a future update.
+
+### Environmental Events (V2 Protocol)
+
+The plugin receives presence and observation data from Snarling's thermal/environmental system via a `POST /environmental-event` route. This replaces the old V1 event types (`presence_change`, `presence_settled`) with a unified `observation_report` type.
+
+**V2 event format:**
+```json
+{
+  "type": "observation_report",
+  "trigger_reason": "presence_settled" | "scheduled" | "startup",
+  "present": true,
+  "absent_duration": "2h 15m",
+  "world_state": { "source_count": 3 },
+  "changes_since_last": {
+    "appeared": { "sensor_1": { ... } },
+    "disappeared": { ... },
+    "changed": { ... }
+  }
+}
+```
+
+**Trigger reasons:**
+- `presence_settled` — thermal sensor confirmed someone arrived/stayed (was V1's `presence_settled` event)
+- `scheduled` — 30-minute periodic observation tick
+- `startup` — first observation after service start
+
+**V1 backwards compatibility:** The plugin still handles V1 events for transition:
+- `presence_change` → formatted as a simple presence update (doesn't wake agent)
+- `presence_settled` (without `trigger_reason`) → treated as `observation_report` with `trigger_reason: "presence_settled"`
+
+**Wake behavior:** Only `observation_report` and V1 `presence_settled` wake the agent. `presence_change` is acknowledged but doesn't wake. A 5-second dedup window prevents double-wakes from V1/V2 overlap.
+
+**Event delivery:** Wake events are delivered via `subagent.run`, which creates a real agent turn in the target session. This ensures events actually reach the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + a 300ms-delayed `runHeartbeatOnce` (note: this fallback is lossy — events can be silently dropped when the target session is `done`). This is the same delivery method used for approval callbacks.
+
+**Configuration:** Set `presenceTarget` in plugin config to route events to a specific agent (default: `main`). Set to `disabled` to acknowledge events but not route them to any agent. The session key is constructed as `agent:{presenceTarget}:main`.
+
+### Reducing Agent Wake-ups (Data Kill Switches)
+
+Two plugin config options let you reduce OpenClaw CPU usage by controlling how much thermal/environmental data flows through the system:
+
+| Config Key | Type | Default | Effect |
+|---|---|---|---|
+| `environmentalEventsEnabled` | boolean | `true` | When `false`, the `/environmental-event` HTTP route returns `{status: "disabled"}` immediately — no event processing, no agent wake calls, no observation reports. The route still exists (returns 200) so Snarling doesn't error. |
+| `presenceTarget` | string | `"main"` | Set to `"disabled"` to acknowledge events but skip agent routing — the event is logged but no agent session is woken. Lighter touch than disabling entirely; useful when you want Snarling to keep running but don't need the agent to react to presence changes. |
+
+```json
+// Disable environmental events entirely — maximum CPU savings on OpenClaw
+{
+  "openclaw-interaction-bridge-v2": {
+    "enabled": true,
+    "config": {
+      "environmentalEventsEnabled": false
+    }
+  }
+}
+
+// Or: keep the endpoint active but stop routing to any agent
+{
+  "openclaw-interaction-bridge-v2": {
+    "enabled": true,
+    "config": {
+      "presenceTarget": "disabled"
+    }
+  }
+}
+```
+
+Both switches are safe in any combination. Snarling's `ENVIRONMENTAL_EVENTS_ENABLED` flag (in `snarling.py`) is a separate gate on the sending side — when `False`, Snarling skips the HTTP POST entirely. The two layers work independently:
+
+| Snarling `ENVIRONMENTAL_EVENTS_ENABLED` | Bridge `environmentalEventsEnabled` | Bridge `presenceTarget` | Result |
+|---|---|---|---|
+| `True` | `true` (default) | `"main"` (default) | Normal flow |
+| `True` | `true` | `"disabled"` | Events received but not routed |
+| `True` | `false` | any | Events rejected at bridge |
+| `False` | any | any | No events sent from Snarling |
+
+These are **not** tied to the Snarling thermal camera Hz or display settings. They only control the data pipeline from Snarling → OpenClaw bridge → agent.
+
+**Migration note:** Once Snarling is fully on V2, the V1 compat paths can be removed. During transition, both `observation_report` (V2) and `presence_settled` (V1) will wake the agent for the same semantic event — the dedup window prevents double-waking.
+
 ### Environmental Event Flow
 
 Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HTTP route. The plugin formats them into system events and routes them to the **configured target agent** (default: `main`, configurable via `presenceTarget` plugin config).
 
-**Event routing:** The bridge reads `presenceTarget` from plugin config. If set to `environmental`, events route to `agent:environmental:main` — the dedicated environmental agent session. If unset or `main`, events route to the main agent session.
+**Event routing:** The bridge reads `presenceTarget` from plugin config. If set to `environmental`, events route to `agent:environmental:main` — the dedicated environmental agent session. If set to `disabled`, events are acknowledged but not routed to any agent. If unset or `main`, events route to the main agent session.
 
 ```json
 // Plugin config example
@@ -225,26 +342,16 @@ Snarling POSTs thermal/presence events to the plugin's `/environmental-event` HT
 
 This is how environmental events reach the environmental agent instead of the main agent — no hardcoded routing, just a config value.
 
-**Current event types (V1):**
+**Event types (V2, current):**
 
-| Event Type | When | Wake Agent? | Payload |
-|---|---|---|---|
-| `presence_change` | Human arrived or left | No | `present`, `absent_duration` |
-| `presence_settled` | Human present and stable for 60s | Yes | `absent_duration_sec` |
+| Event Type | When | Wake Agent? | Delivery Method | Payload |
+|---|---|---|---|---|
+| `observation_report` | Presence settled, periodic check, or startup | Yes | `subagent.run` (fallback: `enqueueSystemEvent`) | `trigger_reason`, `world_state`, `changes_since_last` |
+| `presence_change` | Human arrived or left | No | `enqueueSystemEvent` only | `present`, `absent_duration` |
 
-**Planned event types (V2):**
+Only `observation_report` events wake the agent via `subagent.run` — this covers both arrivals (`presence_settled`) and periodic check-ins (`scheduled`). `presence_change` events (raw presence flips) are too frequent to warrant waking the agent and are enqueued for the next heartbeat instead.
 
-| Event Type | When | Wake Agent? | Payload |
-|---|---|---|---|
-| `presence_settled` | Human present and stable for 60s | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
-| `heartbeat` | Every 30m (active) / 2-4h (inactive) | Yes | `trigger_reason`, `world_state`, `changes_since_last` |
-
-V2 changes to the plugin are minimal:
-- `formatEnvironmentalEvent()` — add `trigger_reason` to output text, handle `heartbeat` type
-- `shouldWakeAgent()` — return true for both `presence_settled` and `heartbeat`
-- Event payloads now include `world_state` + `changes_since_last` — bridge just stringifies them
-
-No structural changes — same HTTP route, same `enqueueSystemEvent` + `runHeartbeatOnce` flow, same `presenceTarget` routing.
+**Why `subagent.run` instead of `enqueueSystemEvent`:** The old `enqueueSystemEvent` + `runHeartbeatOnce` delivery path silently drops events when the target agent session is in `done` state. `subagent.run` creates a real agent turn that executes regardless of session state, ensuring events are always delivered. This is the same fix applied to the voice bridge for the same bug (#86090).
 
 ## Install from ClawHub
 

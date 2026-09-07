@@ -7,7 +7,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
 // exec import removed — environmental-event handler now uses in-process SDK
-import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats } from "./approval_tool";
+import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats, cleanupOrphanedFlows, getPendingInfo } from "./approval_tool";
 
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
@@ -17,15 +17,22 @@ const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUI
 //
 // presenceTarget config: routes presence events to a specific agent (default: 'main')
 // Set via plugins.entries.openclaw-interaction-bridge-v2.config.presenceTarget
+// Set to 'disabled' to disable event routing entirely
+// environmentalEventsEnabled config: controls whether the /environmental-event route is registered
+// Default: true. Set to false to completely disable environmental event processing.
 let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 const PROCESSING_IDLE_DELAY_MS = 10000; // 10s — same as communicating, simple uniform timeout
 const COMMUNICATING_IDLE_DELAY_MS = 10000; // 10s — reply is near-instant, shorter timeout
 let lastState = ""; // Track last state sent to avoid duplicates
 let lastPresenceSettledAt = 0; // Dedupe window for presence_settled wake
 
-// Wake policy: only wake agent for settled events (not transient presence_change)
+// Wake policy: wake agent for observation_report events
+// The event type is always observation_report; trigger_reason distinguishes why:
+//   "presence_settled" — human arrived and is stable
+//   "scheduled" — periodic check (30m active / 2-4h inactive)
+//   "startup" — first observation after boot
 function shouldWakeAgent(eventType: string): boolean {
-  return eventType === "presence_settled";
+  return eventType === "observation_report" || eventType === "presence_settled";
 }
 
 // Track if HTTP route is registered (only register once)
@@ -100,6 +107,7 @@ async function updateState(status: string, sessionId: string) {
 }
 
 function formatEnvironmentalEvent(event: any): string {
+  // V1 event types — backwards compatible with current snarling
   if (event.type === 'presence_change') {
     let msg = event.present ? 'someone is now present' : 'nobody here';
     if (event.absent_duration) {
@@ -107,14 +115,35 @@ function formatEnvironmentalEvent(event: any): string {
     }
     return `Presence changed: ${msg}`;
   }
-  if (event.type === 'presence_settled') {
+  // V1 presence_settled without trigger_reason — current snarling sends this
+  if (event.type === 'presence_settled' && !event.trigger_reason) {
     let msg = 'presence settled';
     if (event.absent_duration) {
       msg += ` (absent for ${event.absent_duration} before return)`;
     }
     return `Presence settled: ${msg}`;
   }
-  // Future event types will be added here (v3: extended_absence, thermal_anomaly, etc.)
+  // V2 observation_report — unified event type from trigger scheduler
+  // trigger_reason: "presence_settled" | "scheduled" | "startup"
+  if (event.type === 'observation_report' || event.trigger_reason) {
+    const reason = event.trigger_reason || 'presence_settled';
+    let msg = `Observation report (${reason}).`;
+    if (event.absent_duration && reason === 'presence_settled') {
+      msg += ` Absent for ${event.absent_duration} before return.`;
+    }
+    if (event.world_state) {
+      msg += ` World state: ${event.world_state.source_count} sources.`;
+    }
+    if (event.changes_since_last) {
+      const changes = event.changes_since_last;
+      if (changes.bootstrap) return `Observation report (${reason}): bootstrap, ${event.world_state.source_count} sources.`;
+      if (changes.appeared) msg += ` New: ${Object.keys(changes.appeared).join(', ')}.`;
+      if (changes.disappeared) msg += ` Gone: ${Object.keys(changes.disappeared).join(', ')}.`;
+      if (changes.changed) msg += ` Changed: ${Object.keys(changes.changed).join(', ')}.`;
+      if (!changes.appeared && !changes.disappeared && !changes.changed) msg += ' No changes.';
+    }
+    return msg;
+  }
   return `Environmental event: ${JSON.stringify(event)}`;
 }
 
@@ -124,9 +153,29 @@ export default definePluginEntry({
   description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api: any) {
     // State monitoring hooks - track when agent is processing or speaking
+    // Also run periodic orphan TaskFlow cleanup on each agent start
+    let lastOrphanCleanup = 0;
+    const ORPHAN_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // Clean up every 30 minutes
+
     api.on("before_agent_start", (event: any) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
+
+      // Periodic orphan cleanup
+      const now = Date.now();
+      if (now - lastOrphanCleanup > ORPHAN_CLEANUP_INTERVAL_MS) {
+        lastOrphanCleanup = now;
+        const taskFlowApi = api.runtime?.taskFlow;
+        if (taskFlowApi) {
+          cleanupOrphanedFlows(taskFlowApi).then((result) => {
+            if (result.cancelled > 0 || result.errors > 0 || result.details.length > 0) {
+              console.info(`[approval-tool] Orphan cleanup: ${JSON.stringify(result)}`);
+            }
+          }).catch((err: any) => {
+            console.warn(`[approval-tool] Orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+      }
     });
 
     api.on("before_tool_call", (event: any) => {
@@ -328,7 +377,7 @@ export default definePluginEntry({
           // Stats request: send {"action":"stats"} to /approval-callback
           if (body.action === 'stats') {
             res.statusCode = 200;
-            res.end(JSON.stringify({ stats: approvalStats }));
+            res.end(JSON.stringify({ stats: approvalStats, pending: getPendingInfo() }));
             return true;
           }
 
@@ -477,7 +526,17 @@ export default definePluginEntry({
             return true;
           }
 
-          const { notification_id, revealed, time_to_reveal_sec, dismissed, timed_out, secret, sessionKey: bodySessionKey } = body;
+          const { notification_id, action, time_to_reveal_sec, secret, sessionKey: bodySessionKey } = body;
+
+          // Map action-based format from snarling to revealed/dismissed/timed_out booleans
+          let revealed = body.revealed ?? null;
+          let dismissed = body.dismissed ?? null;
+          let timed_out = body.timed_out ?? undefined;
+          if (action) {
+            if (action === 'accepted') { revealed = true; dismissed = false; timed_out = false; }
+            else if (action === 'rejected') { revealed = true; dismissed = true; timed_out = false; }
+            else if (action === 'timed_out') { revealed = false; dismissed = false; timed_out = true; }
+          }
 
           if (!notification_id) {
             res.statusCode = 400;
@@ -485,7 +544,7 @@ export default definePluginEntry({
             return true;
           }
 
-          console.info(`[notification-callback] Received: notification_id=${notification_id}, revealed=${revealed}, dismissed=${dismissed}`);
+          console.info(`[notification-callback] Received: notification_id=${notification_id}, action=${action ?? 'N/A'}, revealed=${revealed}, dismissed=${dismissed}`);
 
           // Verify secret
           if (secret !== APPROVAL_SECRET) {
@@ -542,69 +601,6 @@ export default definePluginEntry({
               res.end(JSON.stringify({ error: result.message, notification_id }));
             }
 
-            // Schedule wake on NEXT event loop tick
-            setImmediate(async () => {
-              try {
-                const wakeReason = "hook:notification_feedback";
-                if (systemApi?.requestHeartbeatNow) {
-                  systemApi.requestHeartbeatNow({
-                    reason: wakeReason,
-                    sessionKey,
-                    coalesceMs: 100
-                  });
-                }
-                if (systemApi?.runHeartbeatOnce) {
-                  systemApi.runHeartbeatOnce({
-                    sessionKey,
-                    reason: wakeReason,
-                    heartbeat: { target: "last" }
-                  }).catch(() => {});
-                }
-                // Second wake attempt after a short delay
-                setTimeout(() => {
-                  try {
-                    systemApi.requestHeartbeatNow?.({
-                      reason: wakeReason,
-                      sessionKey,
-                      coalesceMs: 0
-                    });
-                  } catch (_e) {}
-                }, 500);
-
-                // Reliable fallback: POST to /hooks/wake to trigger heartbeat
-                // Plugin runtime APIs may silently no-op, but /hooks/wake always enqueues + requests heartbeat
-                try {
-                  const hooksToken = process.env.OPENCLAW_HOOKS_TOKEN || "voicebridge-local-hooks-secret";
-                  const hooksUrl = `http://127.0.0.1:${process.env.OPENCLAW_PORT || 18789}/hooks/wake`;
-                  const http = await import("http");
-                  const postData = JSON.stringify({ text: `Notification feedback received: ${notification_id}`, mode: "now" });
-                  const wakeReq = http.request(hooksUrl, {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "Authorization": `Bearer ${hooksToken}`,
-                      "Content-Length": Buffer.byteLength(postData),
-                    },
-                    timeout: 3000,
-                  }, (wakeRes: any) => {
-                    let data = "";
-                    wakeRes.on("data", (chunk: any) => { data += chunk; });
-                    wakeRes.on("end", () => {
-                      console.info(`[notification-callback] /hooks/wake fallback response: ${wakeRes.statusCode} ${data}`);
-                    });
-                  });
-                  wakeReq.on("error", (e: any) => {
-                    console.warn(`[notification-callback] /hooks/wake fallback failed: ${e.message}`);
-                  });
-                  wakeReq.write(postData);
-                  wakeReq.end();
-                } catch (_wakeFallbackErr) {
-                  console.warn(`[notification-callback] /hooks/wake fallback error: ${_wakeFallbackErr}`);
-                }
-              } catch (_wakeErr) {
-                // Wake best-effort
-              }
-            });
           } catch (error) {
             console.error(`[notification-callback] Error: ${error}`);
             res.statusCode = 500;
@@ -617,6 +613,9 @@ export default definePluginEntry({
       console.info("[openclaw-interaction-bridge] Registered /notification-callback route");
 
       // Register environmental event route (exact match)
+      // Only register if environmentalEventsEnabled is not explicitly false
+      const envEventsEnabled = api.pluginConfig?.environmentalEventsEnabled !== false; // default true
+      if (envEventsEnabled) {
       api.registerHttpRoute({
         method: "POST",
         path: "/environmental-event",
@@ -645,10 +644,25 @@ export default definePluginEntry({
 
           console.info(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
 
-          // Read presenceTarget from plugin config (default: 'main')
-          const presenceTarget = api.pluginConfig?.presenceTarget || 'main';
+          // Check if environmental events are disabled via config
+          const envEventsEnabled = api.pluginConfig?.environmentalEventsEnabled !== false; // default true
+          if (!envEventsEnabled) {
+            console.info(`[environmental-event] Environmental events disabled via config, skipping`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "disabled", reason: "environmentalEventsEnabled=false" }));
+            return true;
+          }
 
-          // Build event text for system event enqueue
+          // Read presenceTarget from plugin config (default: 'main')
+          // 'disabled' means don't route events to any agent
+          const presenceTarget = api.pluginConfig?.presenceTarget || 'main';
+          if (presenceTarget === 'disabled') {
+            console.info(`[environmental-event] presenceTarget is 'disabled', acknowledging but not routing`);
+            res.statusCode = 200;
+            res.end(JSON.stringify({ status: "received", routedTo: "disabled" }));
+            return true;
+          }
+
           const eventText = formatEnvironmentalEvent(body);
 
           // Determine if this event type should trigger an immediate wake
@@ -716,6 +730,9 @@ export default definePluginEntry({
       });
 
       console.info("[openclaw-interaction-bridge] Registered /environmental-event route");
+      } else {
+        console.info("[openclaw-interaction-bridge] Environmental events disabled via config, skipping /environmental-event route registration");
+      }
     }
   }
 });
