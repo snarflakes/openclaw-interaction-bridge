@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.6 (2026-09-17)
+
+- README: corrected the bottom "Install from ClawHub" block (was `clawhub:@snarflakes/openclaw-interaction-bridge` — broken spec, contradicted the top section); removed the dead NOTIFICATION_POLICY.md link.
+
 ## 1.6.5 (2026-09-17)
 
 - Fix: `before_agent_start` → `before_agent_run` (removed hook name; unblocks the ClawHub plugin inspector against current OpenClaw).

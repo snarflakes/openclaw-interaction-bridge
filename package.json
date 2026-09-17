@@ -1,6 +1,6 @@
 {
   "name": "openclaw-interaction-bridge-v2",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "description": "Bridge OpenClaw agent state directly to snarling display via HTTP API, with notification support",
   "main": "index.mjs",
   "type": "module",

@@ -180,9 +180,7 @@ The plugin sends `duration: 0` by default, letting Snarling decide based on prio
 
 #### Notification Attunement
 
-The feedback loop enables **notification attunement** — the agent learning when and how to reach out effectively. Each notification generates a data point: was it revealed (and how quickly), dismissed without reading, or timed out? Over time, the agent adjusts notification behavior based on what works.
-
-See [NOTIFICATION_POLICY.md](https://github.com/snarflakes/openclaw-interaction-bridge/blob/main/NOTIFICATION_POLICY.md) for the attunement framework details.
+The feedback loop enables **notification attunement** — the agent learning when and how to reach out effectively. Each notification generates a data point: was it revealed (and how quickly), dismissed without reading, or timed out? Over time, the agent adjusts notification behavior based on what works — the beginning of a notification attunement framework.
 
 ### Approval Tracker
 
@@ -355,7 +353,7 @@ Only `observation_report` events wake the agent via `subagent.run` — this cove
 ## Install from ClawHub
 
 ```bash
-openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
+openclaw plugins install clawhub:openclaw-interaction-bridge-v2
 ```
 
 ## Development
