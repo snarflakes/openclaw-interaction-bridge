@@ -33,7 +33,7 @@ For optional status update functionality, you must add `hooks.allowConversationA
 {
   "plugins": {
     "entries": {
-      "openclaw-interaction-bridge": {
+      "openclaw-interaction-bridge-v2": {
         "enabled": true,
         "hooks": { "allowConversationAccess": true }
       }
@@ -55,17 +55,16 @@ Without this setting, the `agent_end` hook is silently blocked and the display w
 ## Installation
 
 ```bash
-# Clone to your OpenClaw extensions directory
-git clone https://github.com/snarflakes/openclaw-interaction-bridge.git \
-  ~/.openclaw/extensions/openclaw-interaction-bridge
-
-# Install dependencies
-cd ~/.openclaw/extensions/openclaw-interaction-bridge
-npm install
-
-# Restart OpenClaw
-openclaw gateway restart
+openclaw plugins install clawhub:openclaw-interaction-bridge-v2
 ```
+
+The managed install records the package source, so later updates follow the same tracked record:
+
+```bash
+openclaw plugins update openclaw-interaction-bridge-v2
+```
+
+For hardened installations using a restrictive `plugins.allow` list, allow the plugin id `openclaw-interaction-bridge-v2`; enabling the plugin from the Control UI records it into an existing allowlist automatically.
 
 ### Prerequisites
 
