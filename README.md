@@ -84,7 +84,7 @@ const SNARLING_URL = "http://localhost:5000/state";    // → your state endpoin
 const CALLBACK_BASE_URL = "http://localhost:18789";    // → your callback base URL
 ```
 
-The approval secret is set via `OPENCLAW_APPROVAL_SECRET` env var. If not set, a random UUID is generated on each startup. The secret must be included in the JSON body of callback requests (not query params — the gateway strips those).
+The approval secret defaults to a random UUID generated at gateway start. To pin it, set `approvalSecret` in the plugin config (`plugins.entries.openclaw-interaction-bridge-v2.config.approvalSecret`). The secret must be included in the JSON body of callback requests (not query params — the gateway strips those). Snarling receives the secret in the alert payload and echoes it back in callback bodies — no environment variable is needed on either side.
 
 No config file yet — when there are multiple adapters, a config-driven system will make sense. For now, editing the source is honest and simple.
 

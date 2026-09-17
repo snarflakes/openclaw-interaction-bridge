@@ -11,7 +11,8 @@ import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNo
 
 const SNARLING_URL = "http://localhost:5000/state";
 const CALLBACK_BASE_URL = "http://localhost:18789";
-const APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
+// Approval callback secret — now config-driven (was OPENCLAW_APPROVAL_SECRET env var)
+let APPROVAL_SECRET = crypto.randomUUID();
 // Session routing now handled by in-process SDK (enqueueSystemEvent + runHeartbeatOnce)
 // Non-wake events are informational and will be picked up by next heartbeat
 //
@@ -152,6 +153,9 @@ export default definePluginEntry({
   name: "OpenClaw Interaction Bridge",
   description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api: any) {
+    // Approval callback secret — config-driven (was OPENCLAW_APPROVAL_SECRET env var)
+    APPROVAL_SECRET = api.pluginConfig?.approvalSecret || crypto.randomUUID();
+
     // State monitoring hooks - track when agent is processing or speaking
     // Also run periodic orphan TaskFlow cleanup on each agent start
     let lastOrphanCleanup = 0;

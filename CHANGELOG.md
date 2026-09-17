@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Security-scan fix: approval secret moved from the `OPENCLAW_APPROVAL_SECRET` env var to plugin config (`approvalSecret`) — clears the `suspicious.env_credential_access` finding. Random-UUID-per-startup fallback preserved; snarling echo flow unchanged (verified: snarling.py never reads the env var, no snarling changes needed).
+- Manifest: removed legacy `channelEnvVars` and obsolete env-var metadata.
+
 ## 1.6.6 (2026-09-17)
 
 - README: corrected the bottom "Install from ClawHub" block (was `clawhub:@snarflakes/openclaw-interaction-bridge` — broken spec, contradicted the top section); removed the dead NOTIFICATION_POLICY.md link.

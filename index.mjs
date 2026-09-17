@@ -9417,7 +9417,7 @@ async function resumeNotificationFlow(notificationId, feedback, taskFlowApi, sys
 // index.ts
 var SNARLING_URL = "http://localhost:5000/state";
 var CALLBACK_BASE_URL = "http://localhost:18789";
-var APPROVAL_SECRET = process.env.OPENCLAW_APPROVAL_SECRET || crypto.randomUUID();
+var APPROVAL_SECRET = crypto.randomUUID();
 var idleTimeout = null;
 var PROCESSING_IDLE_DELAY_MS = 1e4;
 var COMMUNICATING_IDLE_DELAY_MS = 1e4;
@@ -9518,6 +9518,7 @@ var index_default = definePluginEntry({
   name: "OpenClaw Interaction Bridge",
   description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api) {
+    APPROVAL_SECRET = api.pluginConfig?.approvalSecret || crypto.randomUUID();
     api.on("before_agent_run", (event) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
