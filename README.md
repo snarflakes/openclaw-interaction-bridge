@@ -9,10 +9,7 @@ OpenClaw 2026.8.1 restructured the plugin runtime API. Key changes:
 - **`api.runtime.taskFlow`** moved to **`api.runtime.tasks.managedFlows`** — the TaskFlow API (with `bindSession` and `fromToolContext`) is now nested under `api.runtime.tasks` alongside `flows` and `runs`.
 - **Plugin runtime keys** in 2026.8+: `version`, `gateway`, `config`, `agent`, `subagent`, `system`, `media`, `mediaUnderstanding`, `tts`, `channel`, `events`, `logging`, `state`, `modelAuth`, `imageGeneration`, `videoGeneration`, `musicGeneration`, `llm`, `tasks`.
 
-The plugin uses a backwards-compatible priority chain so it works on both old and new versions:
-```javascript
-api.runtime?.tasks?.managedFlows ?? api.runtime?.managedFlows ?? api.runtime?.taskFlow
-```
+The plugin resolves TaskFlow from `api.runtime.taskFlow` (via `fromToolContext` / `bindSession`) and delivers results through `subagent.run` — live-verified on 2026.8+ and 2026.9.x. If a future OpenClaw removes the top-level alias, switch to `api.runtime.tasks.managedFlows` (its noted 2026.8+ location).
 
 ### General Methodology for OpenClaw 2.0 Plugin Updates
 
@@ -96,6 +93,7 @@ The plugin hooks into OpenClaw events and POSTs state to Snarling:
 
 | OpenClaw Event | Snarling State | Meaning |
 |---|---|---|
+| `before_agent_run` | `processing` | Agent run started (before model submission) |
 | `before_tool_call` | `processing` | Agent is using tools |
 | `before_agent_reply` | `communicating` | Agent is generating a response |
 | `agent_end` | `sleeping` | Agent finished its turn |
@@ -221,7 +219,7 @@ Stats are in-memory only — they reset on gateway restart.
 
 ```
 OpenClaw Agent
-      ↓ (plugin hooks: before_tool_call, before_agent_reply, agent_end)
+      ↓ (plugin hooks: before_agent_run, before_tool_call, before_agent_reply, agent_end)
 Interaction Bridge Plugin
       ↓ (POST localhost:5000/state)               ← state updates
       ↓ (POST localhost:5000/approval/alert)      ← approval requests
