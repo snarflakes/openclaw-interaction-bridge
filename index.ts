@@ -157,7 +157,7 @@ export default definePluginEntry({
     let lastOrphanCleanup = 0;
     const ORPHAN_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // Clean up every 30 minutes
 
-    api.on("before_agent_start", (event: any) => {
+    api.on("before_agent_run", (event: any) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
 

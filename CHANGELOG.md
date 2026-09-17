@@ -2,6 +2,8 @@
 
 ## 1.6.5 (2026-09-17)
 
+- Fix: `before_agent_start` → `before_agent_run` (removed hook name; unblocks the ClawHub plugin inspector against current OpenClaw).
+
 - Data kill switches: `environmentalEventsEnabled` and `presenceTarget=disabled` (route or fully disable environmental event processing).
 - Notification feedback mapped to revealed / dismissed / timed_out states.
 - Removed agent wake calls from the notification feedback path.

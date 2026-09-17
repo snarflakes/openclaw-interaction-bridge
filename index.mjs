@@ -9518,7 +9518,7 @@ var index_default = definePluginEntry({
   name: "OpenClaw Interaction Bridge",
   description: "Bridge OpenClaw agent state directly to snarling display via HTTP API",
   register(api) {
-    api.on("before_agent_start", (event) => {
+    api.on("before_agent_run", (event) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
     });
