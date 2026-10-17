@@ -126,10 +126,21 @@ function prunePendingEntries() {
 /** Called by the channel renderer when a forwarded pending card is built. */
 function recordPendingApproval(request: PluginApprovalRequest, action: string) {
   prunePendingEntries();
+  const toolCallId = request.request?.toolCallId ?? null;
+  const sessionKey = request.request?.sessionKey ?? null;
+  const existing = toolCallId ? pendingApprovals.get(toolCallId) : undefined;
+  if (existing && existing.approvalId.startsWith("gate:")) {
+    // Upgrade the gate-time placeholder to the real approval id.
+    existing.approvalId = request.id;
+    existing.sessionKey = sessionKey ?? existing.sessionKey;
+    existing.action = action;
+    pendingApprovals.set(request.id, existing);
+    return;
+  }
   const entry: PendingApprovalEntry = {
     approvalId: request.id,
-    toolCallId: request.request?.toolCallId ?? null,
-    sessionKey: request.request?.sessionKey ?? null,
+    toolCallId,
+    sessionKey,
     action,
     createdAt: Date.now()
   };
@@ -216,16 +227,31 @@ export async function handleHookResolution(
         if (ctx.sessionKey) {
           const entries = [...pendingApprovals.values()].filter((e, i, a) => a.indexOf(e) === i && e.sessionKey === ctx.sessionKey);
           if (entries.length === 1) {
-            pendingApprovals.delete(entries[0].approvalId);
-            if (entries[0].toolCallId) pendingApprovals.delete(entries[0].toolCallId as string);
-            return entries[0];
+            const e0 = entries[0];
+            pendingApprovals.delete(e0.approvalId);
+            if (e0.toolCallId) pendingApprovals.delete(e0.toolCallId);
+            return e0;
+          }
+        }
+        if (d === "timeout" && ctx.toolCallId) {
+          // ToolCallId never bound (card forward lost/never happened): drop a
+          // stale gate placeholder for this call so the registry can't leak.
+          const stale = pendingApprovals.get(ctx.toolCallId);
+          if (stale) {
+            pendingApprovals.delete(stale.approvalId);
+            if (stale.toolCallId) pendingApprovals.delete(stale.toolCallId);
+            return stale;
           }
         }
         return null;
       })()
     : null;
   try {
-    await pushApprovalResolution({ requestId: matched?.approvalId, decision: d }, opts);
+    // Placeholder entries ("gate:" prefix) never had a real approval id
+    // forwarded — push an id-less resolution (display clears its single
+    // pending card); real ids clear by exact match.
+    const requestId = matched?.approvalId && !String(matched.approvalId).startsWith("gate:") ? matched.approvalId : null;
+    await pushApprovalResolution({ requestId, decision: d }, opts);
   } catch (_e) { /* push errors already logged */ }
 }
 
@@ -254,6 +280,25 @@ export function requireApprovalForRequestUserApproval(
   const message = typeof params?.message === "string" ? params.message : "";
   approvalStats.requested++;
   const toolCallId = ctx?.toolCallId ?? null;
+  // Gate-time placeholder: bind this hook invocation to a registry entry NOW so
+  // a timeout resolution can always find its approval id (the forwarded-card
+  // binding only exists if/when the card is forwarded). The placeholder is
+  // upgraded to the real approval id when the forwarder binds one.
+  let gatePlaceholderId: string | null = null;
+  if (toolCallId) {
+    prunePendingEntries();
+    const existing = pendingApprovals.get(toolCallId);
+    if (!existing || existing.approvalId.startsWith("gate:")) {
+      gatePlaceholderId = `gate:${toolCallId}`;
+      pendingApprovals.set(toolCallId, {
+        approvalId: gatePlaceholderId,
+        toolCallId,
+        sessionKey: ctx?.sessionKey ?? null,
+        action,
+        createdAt: Date.now()
+      });
+    }
+  }
   return {
     requireApproval: {
       title: action.slice(0, 80),

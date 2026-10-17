@@ -2436,10 +2436,20 @@ function prunePendingEntries() {
 }
 function recordPendingApproval(request, action) {
   prunePendingEntries();
+  const toolCallId = request.request?.toolCallId ?? null;
+  const sessionKey = request.request?.sessionKey ?? null;
+  const existing = toolCallId ? pendingApprovals.get(toolCallId) : void 0;
+  if (existing && existing.approvalId.startsWith("gate:")) {
+    existing.approvalId = request.id;
+    existing.sessionKey = sessionKey ?? existing.sessionKey;
+    existing.action = action;
+    pendingApprovals.set(request.id, existing);
+    return;
+  }
   const entry = {
     approvalId: request.id,
-    toolCallId: request.request?.toolCallId ?? null,
-    sessionKey: request.request?.sessionKey ?? null,
+    toolCallId,
+    sessionKey,
     action,
     createdAt: Date.now()
   };
@@ -2503,15 +2513,25 @@ async function handleHookResolution(decision, ctx, opts) {
     if (ctx.sessionKey) {
       const entries = [...pendingApprovals.values()].filter((e, i, a) => a.indexOf(e) === i && e.sessionKey === ctx.sessionKey);
       if (entries.length === 1) {
-        pendingApprovals.delete(entries[0].approvalId);
-        if (entries[0].toolCallId) pendingApprovals.delete(entries[0].toolCallId);
-        return entries[0];
+        const e0 = entries[0];
+        pendingApprovals.delete(e0.approvalId);
+        if (e0.toolCallId) pendingApprovals.delete(e0.toolCallId);
+        return e0;
+      }
+    }
+    if (d === "timeout" && ctx.toolCallId) {
+      const stale = pendingApprovals.get(ctx.toolCallId);
+      if (stale) {
+        pendingApprovals.delete(stale.approvalId);
+        if (stale.toolCallId) pendingApprovals.delete(stale.toolCallId);
+        return stale;
       }
     }
     return null;
   })() : null;
   try {
-    await pushApprovalResolution({ requestId: matched?.approvalId, decision: d }, opts);
+    const requestId = matched?.approvalId && !String(matched.approvalId).startsWith("gate:") ? matched.approvalId : null;
+    await pushApprovalResolution({ requestId, decision: d }, opts);
   } catch (_e) {
   }
 }
@@ -2521,6 +2541,21 @@ function requireApprovalForRequestUserApproval(toolName, params, ctx, opts) {
   const message = typeof params?.message === "string" ? params.message : "";
   approvalStats.requested++;
   const toolCallId = ctx?.toolCallId ?? null;
+  let gatePlaceholderId = null;
+  if (toolCallId) {
+    prunePendingEntries();
+    const existing = pendingApprovals.get(toolCallId);
+    if (!existing || existing.approvalId.startsWith("gate:")) {
+      gatePlaceholderId = `gate:${toolCallId}`;
+      pendingApprovals.set(toolCallId, {
+        approvalId: gatePlaceholderId,
+        toolCallId,
+        sessionKey: ctx?.sessionKey ?? null,
+        action,
+        createdAt: Date.now()
+      });
+    }
+  }
   return {
     requireApproval: {
       title: action.slice(0, 80),
