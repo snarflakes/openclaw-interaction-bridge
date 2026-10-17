@@ -2669,6 +2669,29 @@ async function resolveNativePluginApproval(cfg, approvalId, decision) {
     clientDisplayName: "snarling display approval"
   });
 }
+function registerApprovalsConfigMigration(api) {
+  if (typeof api?.registerConfigMigration !== "function") return;
+  api.registerConfigMigration((config) => {
+    const cfg = config ?? {};
+    const approvals = cfg.approvals;
+    if (approvals && typeof approvals === "object" && approvals.plugin) return null;
+    const seededPlugin = {
+      enabled: true,
+      mode: "targets",
+      targets: [{ channel: "snarling", to: "display" }]
+    };
+    const next = {
+      ...cfg,
+      approvals: { ...approvals && typeof approvals === "object" ? approvals : {}, plugin: seededPlugin }
+    };
+    return {
+      config: next,
+      changes: [
+        "openclaw-interaction-bridge-v2: seeded approvals.plugin targets with the registered snarling display channel (idempotent install setup; no existing approvals config was present)"
+      ]
+    };
+  });
+}
 
 // index.ts
 var notificationStats = {
@@ -2824,6 +2847,11 @@ var index_default = definePluginEntry({
       console.info("[openclaw-interaction-bridge] Registered snarling channel plugin (native approval forwarding target)");
     } catch (err) {
       console.error(`[openclaw-interaction-bridge] Failed to register snarling channel plugin: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      registerApprovalsConfigMigration(api);
+    } catch (err) {
+      console.warn(`[openclaw-interaction-bridge] approvals.plugin auto-setup skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
     api.registerTool((ctx) => {
       return {

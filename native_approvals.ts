@@ -449,3 +449,44 @@ export async function resolveNativePluginApproval(
     clientDisplayName: "snarling display approval"
   })) as unknown as { applied: boolean; approval?: Record<string, unknown> };
 }
+
+/**
+ * Automatic approvals.transport setup (v1.8.0).
+ *
+ * Seeds the Gateway transport config `approvals.plugin` so a fresh install
+ * works out of the box: the native approval forwarding target points at the
+ * "snarling" channel this plugin registers.
+ *
+ * Idempotent and strictly non-destructive:
+ * - if `approvals.plugin` exists at all (any shape), the user owns that config
+ *   and this migration returns null (no changes);
+ * - otherwise it merges `approvals.plugin` into the (possibly absent)
+ *   `approvals` block, preserving any other keys already there.
+ *
+ * Registered via api.registerConfigMigration — the SDK runs these before the
+ * plugin runtime loads, through the gateway's normal backup/verify config
+ * write flow (docs/gateway/doctor/config-migrations.md).
+ */
+export function registerApprovalsConfigMigration(api: any): void {
+  if (typeof api?.registerConfigMigration !== "function") return; // older hosts
+  api.registerConfigMigration((config: Record<string, unknown> | undefined | null) => {
+    const cfg = (config ?? {}) as Record<string, any>;
+    const approvals = cfg.approvals;
+    if (approvals && typeof approvals === "object" && approvals.plugin) return null;
+    const seededPlugin = {
+      enabled: true,
+      mode: "targets",
+      targets: [{ channel: "snarling", to: "display" }]
+    };
+    const next = {
+      ...cfg,
+      approvals: { ...(approvals && typeof approvals === "object" ? approvals : {}), plugin: seededPlugin }
+    };
+    return {
+      config: next,
+      changes: [
+        "openclaw-interaction-bridge-v2: seeded approvals.plugin targets with the registered snarling display channel (idempotent install setup; no existing approvals config was present)"
+      ]
+    };
+  });
+}

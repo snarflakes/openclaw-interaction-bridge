@@ -105,6 +105,8 @@ Duplicates are suppressed — only state *changes* are sent.
 
 Since v1.8.0, `request_user_approval` uses the **Gateway-native plugin approval flow** (OpenClaw 2026.10.2+). The plugin registers a minimal `snarling` **channel plugin**, and the Gateway forwards pending plugin approvals to it via `approvals.plugin` targets. The `approvalSecret` mechanism is unchanged (display → bridge auth stays plugin-config based; no auth-model changes).
 
+**Setup is automatic on OpenClaw 2026.10.2+:** on gateway load the plugin registers a config migration that seeds the `approvals.plugin` block below if (and only if) it doesn't exist — idempotent, and it never touches an `approvals.plugin` block you already have. The manual snippet below is only for pinning custom targets or a host older than 2026.10.2.
+
 Add this to your openclaw.json (transport config, not plugin config):
 
 ```jsonc

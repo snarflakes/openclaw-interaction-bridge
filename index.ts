@@ -13,6 +13,7 @@ import {
   getPendingApprovalInfo,
   noteApprovalResolvedLocally,
   pushApprovalResolution,
+  registerApprovalsConfigMigration,
   requireApprovalForRequestUserApproval,
   resolveNativePluginApproval,
   resolvePluginApprovalTimeoutMs,
@@ -229,6 +230,14 @@ export default definePluginEntry({
       console.info("[openclaw-interaction-bridge] Registered snarling channel plugin (native approval forwarding target)");
     } catch (err) {
       console.error(`[openclaw-interaction-bridge] Failed to register snarling channel plugin: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Automatic approvals.plugin seeding so installs work out of the box,
+    // and the owner never hand-edits transport config (v1.8.0).
+    try {
+      registerApprovalsConfigMigration(api);
+    } catch (err) {
+      console.warn(`[openclaw-interaction-bridge] approvals.plugin auto-setup skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Register the approval tool — the deliberate ask-the-user tool.
