@@ -101,36 +101,84 @@ The plugin hooks into OpenClaw events and POSTs state to Snarling:
 
 Duplicates are suppressed — only state *changes* are sent.
 
-### Approval Flow
+### v1.8.0 native approvals setup
+
+Since v1.8.0, `request_user_approval` uses the **Gateway-native plugin approval flow** (OpenClaw 2026.10.2+). The plugin registers a minimal `snarling` **channel plugin**, and the Gateway forwards pending plugin approvals to it via `approvals.plugin` targets. The `approvalSecret` mechanism is unchanged (display → bridge auth stays plugin-config based; no auth-model changes).
+
+Add this to your openclaw.json (transport config, not plugin config):
+
+```jsonc
+{
+  "approvals": {
+    "plugin": {
+      "enabled": true,
+      "mode": "targets",
+      "targets": [
+        { "channel": "snarling", "to": "display" }
+      ]
+    }
+  }
+}
+```
+
+Notes on this config:
+
+- The `snarling` channel requires **no account config** (`channels.snarling` does not need to exist). It is a local display push target, not a conversation transport — no token, no allowlist, no pairing. The `to` value is accepted but ignored by the bridge (single physical display).
+- Do **not** add a `snarling` reviewer entry under `approvals.plugin` — per-channel reviewer lists (`approvals.plugin.snarling.approvers`) are user-scope controls for chat channels; the display is a shared trusted surface gated by the approvalSecret instead.
+- Optional plugin config knob:
+
+// plugins.entries.openclaw-interaction-bridge-v2.config
+{
+  "pluginApprovalTimeoutMs": 120000,  // default 120000 (2 min); Gateway caps at 600000 (10 min)
+  "approvalSecret": "<uuid>"
+}
+```
+
+Snarling display side: nothing is required to render cards (same `/approval/alert` shape as 1.7: `request_id`, `message`, `timeout_seconds`, `request_id` value is now the native approval id `plugin:<uuid>`). To **clear the card only after a decision** is recorded, Snarling should recognize the new resolution push:
+
+```json
+{
+  "type": "approval_resolved",
+  "request_id": "plugin:<uuid>",
+  "approved": true,
+  "decision": "allow-once",
+  "message": "Approval approved (allow-once). (request: plugin:<uuid>)",
+  "priority": "normal",
+  "duration": 0,
+  "secret": "uuid"
+}
+```
+
+When a push with `type: "approval_resolved"` arrives, remove/collapse the card with the matching `request_id`. If it is not recognized, the push is harmless (unknown type) — the Gateway's forwarded resolved/expired messages are filtered out by the bridge, so a stale card remains only until its own `timeout_seconds` lapses.
+
+### Native Approval Flow (v1.8.0)
 
 When the agent calls `request_user_approval`:
 
-1. Plugin creates a TaskFlow and sets it to waiting state
-2. POSTs approval request directly to Snarling on port 5000 (`/approval/alert`) — no middleman
-3. Snarling displays the request on screen with A/B button prompt
-4. User presses A (approve) or B (reject)
-5. Snarling forwards the decision to the plugin's `/approval-callback` HTTP route
-6. Plugin resumes the TaskFlow (bookkeeping: `resume` → `finish`) and delivers the result to the agent via `subagent.run`
-7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+1. The plugin's `before_tool_call` hook returns `requireApproval` — the **Gateway** creates a pending native approval (id `plugin:<uuid>`) and blocks the tool call
+2. The Gateway forwards the pending approval to the bridge's `snarling` channel (via `approvals.plugin` targets — see the setup section above)
+3. The bridge POSTs the approval card directly to Snarling on port 5000 (`/approval/alert`) — no middleman, same shape as 1.7
+4. Snarling displays the request on screen with A/B button prompt
+5. User presses A (approve → `allow-once`) or B (reject → `deny`)
+6. Snarling forwards the decision to the plugin's `/approval-callback` HTTP route (`approvalSecret` body check unchanged)
+7. The bridge pushes `type: "approval_resolved"` to the display (card clears only after the decision), then resolves the **native approval over the Gateway RPC** (`approval.resolve`, kind `plugin`, via `openclaw/plugin-sdk/approval-gateway-runtime`)
+8. The Gateway unblocks (`allow-once`) or denies the waiting tool call — the agent continues or receives a denied tool result automatically, with no manual wake
 
-**Delivery:** The approval result is delivered to the agent via `subagent.run`, which creates a real agent turn in the target session. This ensures the result reaches the agent even when its session is idle or recently completed. If `subagent.run` is unavailable, the plugin falls back to `enqueueSystemEvent` + `runHeartbeatOnce` (note: this fallback is lossy — results can be silently dropped when the target session is `done`).
+**Delivery:** Handled natively by the Gateway's `plugin.approval.waitDecision` machinery — the old manual `subagent.run` / heartbeat wake path is gone. `onResolution` also fires on the plugin for decisions made on other surfaces (webchat `/approve`, Control UI, timeout), pushing the same card-clear.
 
-Only one approval at a time — subsequent requests are blocked until the current one is resolved (with a 30-minute stale timeout as a safety net).
+Timeout is `pluginApprovalTimeoutMs` (default 120000, Gateway-capped at 600000). Legacy `approval-<ts>-<rand>` request ids from stale cards are rejected with a 400 — only `plugin:<id>` ids resolve.
 
 ### Notification Flow
 
 When the agent calls `send_notification`:
 
-1. Plugin creates a TaskFlow and sets it to waiting state
-2. POSTs notification to Snarling on port 5000 (`/approval/alert`) with `type: "notification"`
-3. Snarling displays the notification on screen with priority-based face and banner behavior
-4. User interacts: A press reveals text, B press dismisses, or low-priority auto-dismisses after timeout
-5. Snarling forwards feedback (revealed/dismissed/timed out + timing) to the plugin's `/notification-callback` HTTP route
-6. Plugin resumes the TaskFlow (bookkeeping) and delivers feedback to the agent
+1. POSTs notification to Snarling on port 5000 (`/approval/alert`) with `type: "notification"` (fire-and-forget)
+2. Snarling displays the notification on screen with priority-based face and banner behavior
+3. User interacts: A press reveals text, B press dismisses, or low-priority auto-dismisses after timeout
+4. Snarling forwards feedback (revealed/dismissed/timed out + timing) to the plugin's `/notification-callback` HTTP route
+5. The bridge records the feedback (display-side stats) and acknowledges
 
-**Delivery:** Notification feedback is recorded in the TaskFlow state (resume → finish) and delivered as context on the agent's next turn. Notifications are informational — they do **not** wake the agent. If the agent is in an active conversation, the feedback appears as context; otherwise it's stored in the completed TaskFlow for later retrieval. This is intentional: notifications don't require immediate agent action, unlike approvals.
-
-If TaskFlow is unavailable, the notification degrades to fire-and-forget (no feedback).
+**Delivery:** Notifications are informational — they do **not** wake the agent. The old agent-visible TaskFlow feedback path was removed in v1.8.0 (`api.runtime.taskFlow` no longer exists on OpenClaw 2026.10.2); feedback is recorded in plugin stats only.
 
 Parameters:
 - `message` (required) — the notification text

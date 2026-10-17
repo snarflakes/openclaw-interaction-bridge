@@ -1,18 +1,37 @@
 // ~/.openclaw/extensions/openclaw-interaction-bridge/index.ts
-// OpenClaw Interaction Bridge Plugin
+// OpenClaw Interaction Bridge Plugin (v1.8.0 — Gateway-native approvals)
 // - Sends agent state updates directly to snarling (processing/speaking/idle)
-// - Registers approval callback HTTP route for snarling button responses
-// - Exposes /approval-callback and /approval/stats HTTP endpoints
+// - Gateway-native approval flow: requireApproval hook + snarling channel
+//   plugin + /approval-callback resolution over plugin.approval.resolve
+// - Registers send_notification (unchanged) and environmental/routes
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "@sinclair/typebox";
-// exec import removed — environmental-event handler now uses in-process SDK
-import { requestUserApproval, resumeApprovalFlow, resumeNotificationFlow, sendNotificationWithFeedback, forceClearApprovalLock, approvalStats, notificationStats, cleanupOrphanedFlows, getPendingInfo } from "./approval_tool";
+import {
+  approvalStats,
+  createSnarlingChannelPlugin,
+  getPendingApprovalInfo,
+  noteApprovalResolvedLocally,
+  pushApprovalResolution,
+  requireApprovalForRequestUserApproval,
+  resolveNativePluginApproval,
+  resolvePluginApprovalTimeoutMs,
+} from "./native_approvals";
+
+// Notification feedback stats — display-side only on 2026.10.2+ (the old
+// TaskFlow feedback path is gone; see approval_tool.ts header note).
+const notificationStats = {
+  revealed: 0,
+  dismissed: 0,
+  timedOut: 0,
+  errored: 0,
+};
 
 const SNARLING_URL = "http://localhost:5000/state";
-const CALLBACK_BASE_URL = "http://localhost:18789";
-// Approval callback secret — now config-driven (was OPENCLAW_APPROVAL_SECRET env var)
+// Approval callback secret — config-driven (was OPENCLAW_APPROVAL_SECRET env var)
 let APPROVAL_SECRET = crypto.randomUUID();
+// Plugin approval timeout — config-driven (openclaw.plugin.json pluginApprovalTimeoutMs)
+let PLUGIN_APPROVAL_TIMEOUT_MS = 120000; // overridden from pluginConfig below
 // Session routing now handled by in-process SDK (enqueueSystemEvent + runHeartbeatOnce)
 // Non-wake events are informational and will be picked up by next heartbeat
 //
@@ -156,35 +175,32 @@ export default definePluginEntry({
     // Approval callback secret — config-driven (was OPENCLAW_APPROVAL_SECRET env var)
     APPROVAL_SECRET = api.pluginConfig?.approvalSecret || crypto.randomUUID();
 
+    // Plugin approval timeout — config-driven (defaults to 120000, Gateway caps at 600000)
+    PLUGIN_APPROVAL_TIMEOUT_MS = resolvePluginApprovalTimeoutMs(api.pluginConfig?.pluginApprovalTimeoutMs);
+
+    const snarlingPushOpts = () => ({ approvalSecret: APPROVAL_SECRET });
+
     // State monitoring hooks - track when agent is processing or speaking
-    // Also run periodic orphan TaskFlow cleanup on each agent start
-    let lastOrphanCleanup = 0;
-    const ORPHAN_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // Clean up every 30 minutes
 
     api.on("before_agent_run", (event: any) => {
       const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
-
-      // Periodic orphan cleanup
-      const now = Date.now();
-      if (now - lastOrphanCleanup > ORPHAN_CLEANUP_INTERVAL_MS) {
-        lastOrphanCleanup = now;
-        const taskFlowApi = api.runtime?.taskFlow;
-        if (taskFlowApi) {
-          cleanupOrphanedFlows(taskFlowApi).then((result) => {
-            if (result.cancelled > 0 || result.errors > 0 || result.details.length > 0) {
-              console.info(`[approval-tool] Orphan cleanup: ${JSON.stringify(result)}`);
-            }
-          }).catch((err: any) => {
-            console.warn(`[approval-tool] Orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
-          });
-        }
-      }
     });
 
-    api.on("before_tool_call", (event: any) => {
-      const sessionKey = event.sessionKey || event.ctx?.sessionKey || "unknown";
+    // before_tool_call: processing state + the Gateway-native requireApproval
+    // gate for request_user_approval (returns requireApproval for that tool
+    // only; other tools pass through untouched).
+    api.on("before_tool_call", (event: any, ctx: any) => {
+      const sessionKey = event.sessionKey || event.ctx?.sessionKey || ctx?.sessionKey || "unknown";
       updateState("processing", sessionKey);
+      const gate = requireApprovalForRequestUserApproval(
+        event?.toolName,
+        event?.params,
+        { toolCallId: event?.toolCallId ?? ctx?.toolCallId ?? null, sessionKey },
+        { approvalSecret: APPROVAL_SECRET, pluginApprovalTimeoutMs: PLUGIN_APPROVAL_TIMEOUT_MS }
+      );
+      if (gate) return gate;
+      return undefined;
     });
 
     api.on("before_agent_reply", (event: any) => {
@@ -203,71 +219,39 @@ export default definePluginEntry({
       if (idleTimeout) { clearTimeout(idleTimeout); idleTimeout = null; }
     });
 
-    // Register the approval tool using factory pattern
-    // The factory function receives (ctx: OpenClawPluginToolContext) with sessionKey, sessionId, etc.
-    // Plain tool objects do NOT receive ctx in execute — the 3rd arg is empty/undefined at runtime.
-    api.registerTool((ctx: any) => {
-      const sessionKey = ctx?.sessionKey;
+    // Register the snarling channel plugin — the Gateway-native approval
+    // forwarding target. With approvals.plugin { targets: [{ channel:
+    // "snarling", to: "display" }] } the Gateway forwards pending plugin
+    // approvals (created by the requireApproval hook above) to this
+    // channel's outbound adapter, which POSTs the card to the display.
+    try {
+      api.registerChannel(createSnarlingChannelPlugin(snarlingPushOpts));
+      console.info("[openclaw-interaction-bridge] Registered snarling channel plugin (native approval forwarding target)");
+    } catch (err) {
+      console.error(`[openclaw-interaction-bridge] Failed to register snarling channel plugin: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
+    // Register the approval tool — the deliberate ask-the-user tool.
+    // The requireApproval gate in before_tool_call blocks the call until the
+    // decision resolves; execute() therefore only runs after allow-once
+    // (allowedDecisions are [allow-once, deny]) and just reports the result.
+    api.registerTool((ctx: any) => {
       return {
         name: "request_user_approval",
-        description: "Request user approval via snarling display. Creates a TaskFlow that waits for user response. Only one approval at a time.",
+        description: "Ask the user for a deliberate yes/no decision via the snarling display (physical A/B buttons). Do NOT call this for routine progress or informational updates — use send_notification instead for those. Fire-and-forget questions, status updates, and 'heads up' alerts do not need this tool. Use it when the action genuinely must not proceed without explicit user approval.",
         parameters: Type.Object({
           action: Type.String({ description: "The action requiring approval (e.g., 'delete_file', 'send_email')" }),
           message: Type.String({ description: "Human-readable message explaining what needs approval" })
         }),
-        async execute(_toolCallId: string, params: any) {
-          const { action, message } = params;
-
-          if (!sessionKey) {
-            return {
-              content: [{ type: "text", text: "Error: No sessionKey in tool context." }]
-            };
-          }
-
-          // Get TaskFlow bound to this tool context
-          let taskFlow: any = null;
-          try {
-            taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
-          } catch (e) {
-            console.warn(`[approval-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
-          }
-
-          if (!taskFlow) {
-            const taskFlowApi = api.runtime?.taskFlow;
-            if (taskFlowApi?.bindSession) {
-              console.info(`[approval-tool] Using bindSession with sessionKey=${sessionKey}`);
-              taskFlow = taskFlowApi.bindSession({
-                sessionKey,
-                requesterOrigin: "openclaw-interaction-bridge/approval-tool"
-              });
-            }
-          }
-
-          if (!taskFlow) {
-            return {
-              content: [{
-                type: "text",
-                text: "Error: TaskFlow not available. This tool requires an active agent session."
-              }]
-            };
-          }
-
-          const callbackUrl = `${CALLBACK_BASE_URL}/approval-callback`;
-
-          try {
-            const result = await requestUserApproval({ action, message }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
-            return {
-              content: [{ type: "text", text: result }]
-            };
-          } catch (error) {
-            return {
-              content: [{
-                type: "text",
-                text: `Error requesting approval: ${error instanceof Error ? error.message : String(error)}`
-              }]
-            };
-          }
+        async execute(_toolCallId: string, _params: any) {
+          // Reaching here means the Gateway native approval resolved with
+          // allow-once (deny/timeout never execute the tool).
+          return {
+            content: [{
+              type: "text",
+              text: "approved: allow-once — user approved the action on the snarling display. Proceed with the action, then report the result. (The approval decision itself is final; you do not need to re-ask unless the approved action fails for a different reason.)"
+            }]
+          };
         }
       };
     }, { optional: true });
@@ -287,41 +271,8 @@ export default definePluginEntry({
         async execute(_toolCallId: string, params: any) {
           const { message, priority = "normal", duration = 0 } = params;
 
-          // Try TaskFlow-based notification with feedback
-          if (sessionKey) {
-            let taskFlow: any = null;
-            try {
-              taskFlow = api.runtime?.taskFlow?.fromToolContext?.(ctx);
-            } catch (e) {
-              console.warn(`[notification-tool] fromToolContext failed: ${e instanceof Error ? e.message : String(e)}, falling back to bindSession`);
-            }
-
-            if (!taskFlow) {
-              const taskFlowApi = api.runtime?.taskFlow;
-              if (taskFlowApi?.bindSession) {
-                console.info(`[notification-tool] Using bindSession with sessionKey=${sessionKey}`);
-                taskFlow = taskFlowApi.bindSession({
-                  sessionKey,
-                  requesterOrigin: "openclaw-interaction-bridge/notification-tool"
-                });
-              }
-            }
-
-            if (taskFlow) {
-              const callbackUrl = `${CALLBACK_BASE_URL}/notification-callback`;
-              try {
-                const result = await sendNotificationWithFeedback({ message, priority, duration }, taskFlow, { callbackUrl, approvalSecret: APPROVAL_SECRET, sessionKey });
-                return {
-                  content: [{ type: "text", text: result }]
-                };
-              } catch (error) {
-                // Fall through to fire-and-forget on TaskFlow error
-                console.warn(`[notification-tool] TaskFlow notification failed, falling back to fire-and-forget: ${error instanceof Error ? error.message : String(error)}`);
-              }
-            }
-          }
-
-          // Fallback: fire-and-forget notification (no feedback)
+          // Fire-and-forget notification (no feedback; the TaskFlow
+          // feedback path was removed with the 2026.10.2 API change)
           try {
             const response = await fetch("http://localhost:5000/approval/alert", {
               method: "POST",
@@ -353,7 +304,10 @@ export default definePluginEntry({
       };
     }, { optional: true });
 
-    // Register approval callback route (exact match)
+    // Register approval callback route (exact match).
+    // Resolves the NATIVE plugin approval (id `plugin:<uuid>`) via the
+    // Gateway RPC (approval.resolve, kind "plugin"), preserving the
+    // approvalSecret body check. Transport auth remains auth: "gateway".
     if (api.registerHttpRoute && !routeRegistered) {
       routeRegistered = true;
 
@@ -364,7 +318,6 @@ export default definePluginEntry({
         match: "exact",
         replaceExisting: true,
         handler: async (req: any, res: any) => {
-          // Parse body from raw request first (needed for both stats and callback)
           let body: any = {};
           try {
             const chunks: Buffer[] = [];
@@ -381,7 +334,7 @@ export default definePluginEntry({
           // Stats request: send {"action":"stats"} to /approval-callback
           if (body.action === 'stats') {
             res.statusCode = 200;
-            res.end(JSON.stringify({ stats: approvalStats, pending: getPendingInfo() }));
+            res.end(JSON.stringify({ stats: { approvals: approvalStats, notifications: notificationStats }, pending: getPendingApprovalInfo() }));
             return true;
           }
 
@@ -395,113 +348,79 @@ export default definePluginEntry({
 
           console.info(`[approval-callback] Received: request_id=${request_id}, approved=${approved}`);
 
-          // Verify approval secret from request body
-          const callbackSecret = secret;
-          if (callbackSecret !== APPROVAL_SECRET) {
-            console.warn(`[approval-callback] Invalid secret for request ${request_id} (got='${callbackSecret}', expected='${APPROVAL_SECRET}')`);
+          // Verify approval secret from request body (display → bridge auth)
+          if (secret !== APPROVAL_SECRET) {
+            console.warn(`[approval-callback] Invalid secret for request ${request_id}`);
             res.statusCode = 403;
             res.end(JSON.stringify({ error: "Invalid or missing approval secret" }));
             return true;
           }
 
-          // Try sessionKey from body first (gateway strips query params), then URL params
-          const bodySessionKey = body.sessionKey;
-          const sessionKey = bodySessionKey || url.searchParams.get('sessionKey');
-          if (!sessionKey) {
+          // Native plugin approval ids are minted by the Gateway as `plugin:<uuid>`.
+          const approvalId = typeof request_id === 'string' && request_id.startsWith('plugin:')
+            ? request_id
+            : null;
+          if (approvalId === null) {
+            // Legacy TaskFlow-era id (approval-<ts>-<rand>) from a stale card —
+            // those approvals no longer exist in the gateway.
+            console.warn(`[approval-callback] Rejecting non-native approval id ${request_id} (legacy TaskFlow-era card)`);
             res.statusCode = 400;
-            res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
-            return true;
-          }
-          console.info(`[approval-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
-
-          // Bind TaskFlow to the main session for webhook context
-          const taskFlowApi = api.runtime?.taskFlow;
-          if (!taskFlowApi) {
-            res.statusCode = 500;
-            res.end(JSON.stringify({ error: "TaskFlow API not available", request_id }));
+            res.end(JSON.stringify({ error: "Unsupported approval id (expected native plugin approval id 'plugin:<id>')", request_id }));
             return true;
           }
 
-          const boundTaskFlow = taskFlowApi.bindSession({
-            sessionKey,
-            requesterOrigin: "snarling-webhook"
-          });
-
-          // Get system API for waking the agent session
-          const systemApi = api.runtime?.system;
-          if (!systemApi?.enqueueSystemEvent) {
-            console.warn(`[approval-callback] Warning: system API not available, agent may not wake up after approval`);
+          // A/B button semantics preserved: approved=true → allow-once, false → deny.
+          const decision = approved === true ? "allow-once" : approved === false ? "deny" : null;
+          if (decision === null) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: "approved must be true or false", request_id }));
+            return true;
           }
 
+          // Drop the local pending-card binding for this approval — the
+          // resolution push below clears the card on the display.
+          noteApprovalResolvedLocally(approvalId);
+
+          // Push the resolution card-clear FIRST so the card clears only
+          // after the decision.
           try {
-            const result = await resumeApprovalFlow(
-              request_id,
-              approved === true,
-              boundTaskFlow,
-              // Pass minimal systemApi — just enqueueSystemEvent
-              // Wake will happen AFTER HTTP response is sent
-              { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {}), requestHeartbeatNow: () => {}, runHeartbeatOnce: undefined },
-              sessionKey
+            await pushApprovalResolution(
+              { requestId: approvalId, decision },
+              { approvalSecret: APPROVAL_SECRET }
             );
+          } catch (pushErr) {
+            console.warn(`[approval-callback] Resolution push to display failed: ${pushErr instanceof Error ? pushErr.message : String(pushErr)} (continuing with gateway resolution)`);
+          }
 
-            // Safety net: always clear the lock after handling a callback
-            forceClearApprovalLock(request_id);
-
-            // Send HTTP response FIRST — must fully flush before attempting wake
-            if (result.success) {
-              res.statusCode = 200;
-              res.end(JSON.stringify({ status: "success", request_id, approved, message: result.message }));
-            } else {
-              res.statusCode = 404;
-              res.end(JSON.stringify({ error: result.message, request_id }));
-            }
-
-            // Schedule wake on NEXT event loop tick to ensure HTTP response is fully flushed
-            // and the session lane is no longer considered "in-flight"
-            setImmediate(() => {
-              try {
-                const wakeReason = "hook:approval";
-                if (systemApi?.requestHeartbeatNow) {
-                  systemApi.requestHeartbeatNow({
-                    reason: wakeReason,
-                    sessionKey,
-                    coalesceMs: 100
-                  });
-                }
-                if (systemApi?.runHeartbeatOnce) {
-                  systemApi.runHeartbeatOnce({
-                    sessionKey,
-                    reason: wakeReason,
-                    heartbeat: { target: "last" }
-                  }).catch(() => {});
-                }
-                // Second wake attempt after a short delay
-                setTimeout(() => {
-                  try {
-                    systemApi.requestHeartbeatNow?.({
-                      reason: wakeReason,
-                      sessionKey,
-                      coalesceMs: 0
-                    });
-                  } catch (_e) {}
-                }, 500);
-              } catch (_wakeErr) {
-                // Wake best-effort
-              }
-            });
+          // Resolve the native approval over the Gateway RPC. The waiting
+          // tool call resumes (allow-once) or is denied — no manual session
+          // wake needed.
+          try {
+            const result = await resolveNativePluginApproval(api.config, approvalId, decision as "allow-once" | "deny");
+            res.statusCode = 200;
+            res.end(JSON.stringify({
+              status: "success",
+              request_id,
+              approved,
+              decision,
+              applied: result?.applied !== false
+            }));
           } catch (error) {
-            console.error(`[approval-callback] Error: ${error}`);
-            forceClearApprovalLock(request_id);
-            res.statusCode = 500;
-            res.end(JSON.stringify({ error: "Failed to resume TaskFlow", details: String(error), request_id }));
+            const message = error instanceof Error ? error.message : String(error);
+            const notFound = /expired or not found|not found|approval(s)? expired/i.test(message);
+            console.error(`[approval-callback] approval.resolve failed: ${message}`);
+            res.statusCode = notFound ? 404 : 500;
+            res.end(JSON.stringify({ error: notFound ? "Approval expired or not found" : "Failed to resolve approval over gateway", details: message, request_id }));
           }
           return true;
         }
       });
 
-      console.info("[openclaw-interaction-bridge] Registered /approval-callback route (with ?stats=1 for tracker)");
+      console.info("[openclaw-interaction-bridge] Registered /approval-callback route (native plugin approval resolution)");
 
-      // Register notification callback route (exact match)
+    // Register notification callback route (exact match).
+    // v1.8.0: acknowledges display-side feedback; the old TaskFlow resume
+    // path was removed (api.runtime.taskFlow no longer exists on 2026.10.2).
       api.registerHttpRoute({
         method: "POST",
         path: "/notification-callback",
@@ -558,58 +477,18 @@ export default definePluginEntry({
             return true;
           }
 
-          // sessionKey from body, or fall back to URL query params
-          const url = new URL(req.url || '/', `http://localhost`);
-          const sessionKey = bodySessionKey || url.searchParams.get('sessionKey');
-          if (!sessionKey) {
-            res.statusCode = 400;
-            res.end(JSON.stringify({ error: "Missing sessionKey parameter" }));
-            return true;
-          }
-          console.info(`[notification-callback] Using sessionKey: ${sessionKey} (from body: ${!!bodySessionKey})`);
-
-          // Bind TaskFlow to the session
-          const taskFlowApi = api.runtime?.taskFlow;
-          if (!taskFlowApi) {
-            res.statusCode = 500;
-            res.end(JSON.stringify({ error: "TaskFlow API not available", notification_id }));
-            return true;
-          }
-
-          const boundTaskFlow = taskFlowApi.bindSession({
-            sessionKey,
-            requesterOrigin: "snarling-webhook"
-          });
-
-          // Get system API for waking the agent session
-          const systemApi = api.runtime?.system;
-          if (!systemApi?.enqueueSystemEvent) {
-            console.warn(`[notification-callback] Warning: system API not available, agent may not wake up after notification feedback`);
-          }
-
+          // Record display-side feedback stats (the agent-visible TaskFlow
+          // path is gone; feedback is informational only).
+          if (timed_out) notificationStats.timedOut++;
+          else if (revealed) notificationStats.revealed++;
+          else if (dismissed) notificationStats.dismissed++;
+          else notificationStats.errored++;
           try {
-            const result = await resumeNotificationFlow(
-              notification_id,
-              { revealed: revealed ?? null, time_to_reveal_sec: time_to_reveal_sec ?? null, dismissed: dismissed ?? null, timed_out: timed_out ?? undefined },
-              boundTaskFlow,
-              { enqueueSystemEvent: systemApi?.enqueueSystemEvent?.bind(systemApi) ?? (() => {}), requestHeartbeatNow: () => {}, runHeartbeatOnce: undefined },
-              sessionKey
-            );
+            console.info(`[notification-callback] Feedback recorded (display-side only): notification_id=${notification_id}, sessionKey=${bodySessionKey || 'n/a'}`);
+          } catch (_ignore) {}
 
-            // Send HTTP response FIRST
-            if (result.success) {
-              res.statusCode = 200;
-              res.end(JSON.stringify({ status: "success", notification_id, message: result.message }));
-            } else {
-              res.statusCode = 404;
-              res.end(JSON.stringify({ error: result.message, notification_id }));
-            }
-
-          } catch (error) {
-            console.error(`[notification-callback] Error: ${error}`);
-            res.statusCode = 500;
-            res.end(JSON.stringify({ error: "Failed to resume notification TaskFlow", details: String(error), notification_id }));
-          }
+          res.statusCode = 200;
+          res.end(JSON.stringify({ status: "success", notification_id, recorded: "display-side" }));
           return true;
         }
       });
@@ -649,8 +528,8 @@ export default definePluginEntry({
           console.info(`[environmental-event] Received: type=${body.type}, present=${body.present}, absent_duration=${body.absent_duration}`);
 
           // Check if environmental events are disabled via config
-          const envEventsEnabled = api.pluginConfig?.environmentalEventsEnabled !== false; // default true
-          if (!envEventsEnabled) {
+          const envEventsEnabledCheck = api.pluginConfig?.environmentalEventsEnabled !== false; // default true
+          if (!envEventsEnabledCheck) {
             console.info(`[environmental-event] Environmental events disabled via config, skipping`);
             res.statusCode = 200;
             res.end(JSON.stringify({ status: "disabled", reason: "environmentalEventsEnabled=false" }));
