@@ -5,6 +5,17 @@
   "categories": ["other"],
   "skills": ["skills"],
   "channels": ["snarling"],
+  "channelConfigs": {
+    "snarling": {
+      "schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      },
+      "label": "Snarling Display",
+      "description": "Physical A/B-button display connected via the bridge's localhost push (no per-account credentials; the bridge registers it as the native approval forwarding target)."
+    }
+  },
   "contracts": {
     "tools": ["request_user_approval", "send_notification"]
   },
