@@ -110,6 +110,9 @@ interface PendingApprovalEntry {
   toolCallId?: string | null;
   sessionKey?: string | null;
   action: string;
+  /** Gate-time description — used to upgrade placeholders when forwarded
+   * cards omit toolCallId/sessionKey (their presence is conditioned upstream). */
+  description?: string | null;
   createdAt: number;
 }
 
@@ -128,13 +131,29 @@ function recordPendingApproval(request: PluginApprovalRequest, action: string) {
   prunePendingEntries();
   const toolCallId = request.request?.toolCallId ?? null;
   const sessionKey = request.request?.sessionKey ?? null;
-  const existing = toolCallId ? pendingApprovals.get(toolCallId) : undefined;
-  if (existing && existing.approvalId.startsWith("gate:")) {
-    // Upgrade the gate-time placeholder to the real approval id.
-    existing.approvalId = request.id;
-    existing.sessionKey = sessionKey ?? existing.sessionKey;
-    existing.action = action;
-    pendingApprovals.set(request.id, existing);
+  const description = typeof request.request?.description === "string" ? request.request.description : null;
+  // Upgrade a gate-time placeholder when we can identify it: prefer toolCallId,
+  // else fall back to the (action, description) pair the gate recorded.
+  if (toolCallId) {
+    const existing = pendingApprovals.get(toolCallId);
+    if (existing && existing.approvalId.startsWith("gate:")) {
+      existing.approvalId = request.id;
+      existing.sessionKey = sessionKey ?? existing.sessionKey;
+      existing.action = action;
+      existing.description = description ?? existing.description;
+      pendingApprovals.set(request.id, existing);
+      return;
+    }
+  }
+  for (const entry of [...pendingApprovals.values()]) {
+    if (!String(entry.approvalId).startsWith("gate:")) continue;
+    if (entry.action !== action) continue;
+    if (entry.description !== null && description !== null && entry.description !== description) continue;
+    entry.approvalId = request.id;
+    entry.toolCallId = toolCallId ?? entry.toolCallId;
+    entry.sessionKey = sessionKey ?? entry.sessionKey;
+    entry.description = description;
+    pendingApprovals.set(request.id, entry);
     return;
   }
   const entry: PendingApprovalEntry = {
@@ -142,6 +161,7 @@ function recordPendingApproval(request: PluginApprovalRequest, action: string) {
     toolCallId,
     sessionKey,
     action,
+    description,
     createdAt: Date.now()
   };
   if (entry.toolCallId) pendingApprovals.set(entry.toolCallId, entry);
@@ -295,6 +315,7 @@ export function requireApprovalForRequestUserApproval(
         toolCallId,
         sessionKey: ctx?.sessionKey ?? null,
         action,
+        description: message || null,
         createdAt: Date.now()
       });
     }

@@ -2438,12 +2438,27 @@ function recordPendingApproval(request, action) {
   prunePendingEntries();
   const toolCallId = request.request?.toolCallId ?? null;
   const sessionKey = request.request?.sessionKey ?? null;
-  const existing = toolCallId ? pendingApprovals.get(toolCallId) : void 0;
-  if (existing && existing.approvalId.startsWith("gate:")) {
-    existing.approvalId = request.id;
-    existing.sessionKey = sessionKey ?? existing.sessionKey;
-    existing.action = action;
-    pendingApprovals.set(request.id, existing);
+  const description = typeof request.request?.description === "string" ? request.request.description : null;
+  if (toolCallId) {
+    const existing = pendingApprovals.get(toolCallId);
+    if (existing && existing.approvalId.startsWith("gate:")) {
+      existing.approvalId = request.id;
+      existing.sessionKey = sessionKey ?? existing.sessionKey;
+      existing.action = action;
+      existing.description = description ?? existing.description;
+      pendingApprovals.set(request.id, existing);
+      return;
+    }
+  }
+  for (const entry2 of [...pendingApprovals.values()]) {
+    if (!String(entry2.approvalId).startsWith("gate:")) continue;
+    if (entry2.action !== action) continue;
+    if (entry2.description !== null && description !== null && entry2.description !== description) continue;
+    entry2.approvalId = request.id;
+    entry2.toolCallId = toolCallId ?? entry2.toolCallId;
+    entry2.sessionKey = sessionKey ?? entry2.sessionKey;
+    entry2.description = description;
+    pendingApprovals.set(request.id, entry2);
     return;
   }
   const entry = {
@@ -2451,6 +2466,7 @@ function recordPendingApproval(request, action) {
     toolCallId,
     sessionKey,
     action,
+    description,
     createdAt: Date.now()
   };
   if (entry.toolCallId) pendingApprovals.set(entry.toolCallId, entry);
@@ -2552,6 +2568,7 @@ function requireApprovalForRequestUserApproval(toolName, params, ctx, opts) {
         toolCallId,
         sessionKey: ctx?.sessionKey ?? null,
         action,
+        description: message || null,
         createdAt: Date.now()
       });
     }
