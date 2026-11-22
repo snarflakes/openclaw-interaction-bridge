@@ -85,13 +85,12 @@ Duplicates are suppressed — only state *changes* are sent.
 
 When the agent calls `request_user_approval`:
 
-1. Plugin creates a TaskFlow and sets it to waiting state
-2. POSTs approval request directly to Snarling on port 5000 (`/approval/alert`) — no middleman
-3. Snarling displays the request on screen with A/B button prompt
-4. User presses A (approve) or B (reject)
-5. Snarling forwards the decision to the plugin's `/approval-callback` HTTP route
-6. Plugin resumes the TaskFlow and enqueues a system event to wake the agent
-7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+1. Plugin registers a Gateway-native plugin approval and POSTs the request to Snarling on port 5000 (`/approval/alert`) — no middleman
+2. Snarling displays the request on screen with A/B button prompt
+3. User presses A (approve) or B (reject)
+4. Snarling forwards the decision to the plugin's `/approval-callback` HTTP route
+5. Plugin resolves the approval (`allow-once` / `deny`); the Gateway unblocks or denies the waiting tool call automatically — no TaskFlow, no agent wake needed
+6. Approval-gate placeholders are bound at gate time; late responses are matched by `(action, description)` so stale placeholders still resolve
 
 Only one approval at a time — subsequent requests are blocked until the current one is resolved (with a 30-minute stale timeout as a safety net).
 
@@ -99,15 +98,13 @@ Only one approval at a time — subsequent requests are blocked until the curren
 
 When the agent calls `send_notification`:
 
-1. Plugin creates a TaskFlow and sets it to waiting state
-2. POSTs notification to Snarling on port 5000 (`/approval/alert`) with `type: "notification"`
-3. Snarling displays the notification on screen with priority-based face and banner behavior
-4. User interacts: A press reveals text, B press dismisses, or low-priority auto-dismisses after timeout
-5. Snarling forwards feedback (revealed/dismissed/timed out + timing) to the plugin's `/notification-callback` HTTP route
-6. Plugin resumes the TaskFlow and enqueues a system event to wake the agent
-7. Snarling also sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+1. Plugin POSTs the notification to Snarling on port 5000 (`/approval/alert`) with `type: "notification"`
+2. Snarling displays the notification on screen with priority-based face and banner behavior
+3. User interacts: A press reveals text, B press dismisses, or low-priority auto-dismisses after timeout
+4. Snarling forwards feedback (revealed/dismissed/timed out + timing) to the plugin's `/notification-callback` HTTP route
+5. The plugin records display-side feedback stats (revealed/dismissed/timed out) — notifications do **not** wake the agent
 
-If TaskFlow is unavailable, the notification degrades to fire-and-forget (no feedback).
+Notifications are fire-and-forget by design; the old TaskFlow feedback path was removed in v1.8.0.
 
 Parameters:
 - `message` (required) — the notification text
