@@ -56,11 +56,12 @@ The plugin registers a `request_user_approval` tool that routes yes/no decisions
 #### How It Works
 
 1. You call `request_user_approval({ action, message })`
-2. Plugin creates a TaskFlow and sets it to waiting
+2. Plugin registers a Gateway-native plugin approval and POSTs the request to Snarling on port 5000 (`/approval/alert`)
 3. Snarling displays the request on screen with an A/B button prompt
 4. Human presses **A** (approve) or **B** (reject)
 5. Snarling forwards the decision to the plugin's `/approval-callback` route
-6. Plugin resumes the TaskFlow and returns the result
+6. Plugin resolves the approval (`allow-once` / `deny`) and the Gateway unblocks or denies the waiting tool call automatically — no TaskFlow, no agent wake
+7. Approval-gate placeholders are bound at gate time; on timeout they're matched by `(action, description)` so late responses resolve correctly
 
 The tool **blocks** until a response comes back. Only one approval at a time — if another is in progress, the call returns an error message instead of blocking.
 
@@ -223,5 +224,5 @@ No config file needed yet — when there are multiple adapters, a config-driven 
 ## Install from ClawHub
 
 ```bash
-openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
+openclaw plugins install clawhub:openclaw-interaction-bridge-v2
 ```

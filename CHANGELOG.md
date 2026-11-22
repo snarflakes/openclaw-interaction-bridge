@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.1 (2026-11-22) — Docs-only: describe native approvals methodology
+
+- No code changes. Documentation fixes across README.md, SKILL.md, and the bundled skill docs:
+  - Corrected the ClawHub install spec in bundled skill docs (`clawhub:@snarflakes/...` → `clawhub:openclaw-interaction-bridge-v2`).
+  - README now leads with the v1.8.0 Gateway-native plugin-approvals methodology and marks TaskFlow deprecated on OpenClaw 2026.10.2; old 2026.8/2026.9 flow kept under a Historical heading.
+  - Approval/notification flow walkthroughs updated: no TaskFlow, no agent wake; notification feedback recorded as display-side stats only.
+
 ## 1.8.0 (2026-10-17) — Gateway-native approvals (2026.10.2 port)
 
 - **Breaking fix for OpenClaw 2026.10.2:** `request_user_approval` no longer uses the homegrown TaskFlow bridge (`api.runtime.taskFlow.fromToolContext` / `bindSession` no longer exist — the old flow silently failed with "TaskFlow not available"). The tool is now a Gateway-native plugin approval:

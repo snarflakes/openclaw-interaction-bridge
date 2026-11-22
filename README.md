@@ -2,14 +2,18 @@
 
 A plugin that bridges OpenClaw agent activity to any external program! [Snarling](https://github.com/snarflakes/snarling) for example — a Raspberry Pi + DisplayHAT Mini companion that shows what the agent is doing and lets you approve or reject actions with physical A/B buttons and lets agents send notifications with a feedback loop for attunement!
 
-## OpenClaw 2.0 Compatibility (2026.8+)
+## How It Works (v1.8.0 — OpenClaw 2026.10.2+)
 
-OpenClaw 2026.8.1 restructured the plugin runtime API. Key changes:
+**TaskFlow is deprecated for this plugin.** OpenClaw 2026.10.2 removed `api.runtime.taskFlow` (the old `fromToolContext` / `bindSession` flow API), which silently broke the v1.7 approval bridge ("TaskFlow not available"). v1.8.0 replaces it with the Gateway's native plugin-approval mechanism:
 
-- **`api.runtime.taskFlow`** moved to **`api.runtime.tasks.managedFlows`** — the TaskFlow API (with `bindSession` and `fromToolContext`) is now nested under `api.runtime.tasks` alongside `flows` and `runs`.
-- **Plugin runtime keys** in 2026.8+: `version`, `gateway`, `config`, `agent`, `subagent`, `system`, `media`, `mediaUnderstanding`, `tts`, `channel`, `events`, `logging`, `state`, `modelAuth`, `imageGeneration`, `videoGeneration`, `musicGeneration`, `llm`, `tasks`.
+- **`request_user_approval`** is now a **Gateway-native plugin approval**. The tool calls the Gateway's approval API; the plugin resolves `allow-once` / `deny` and the Gateway unblocks or denies the waiting tool call automatically. No TaskFlow is created, no agent wake is needed.
+- **Upgrade compatibility:** on gateways where `approvals.plugin` isn't configured yet, the plugin adds it automatically via config migration on first run (covered by the built-in tests — see `reports/native-approvals-verify.md`).
+- **Approval-gate placeholders** are bound at gate time, matched by `(action, description)` when resolution races occur, and upgraded if the placeholder was left stale.
+- **Notifications** are fire-and-forget by design — informational only, they never wake the agent. The optional TaskFlow feedback path was removed (it never worked on 2026.10.2); `/notification-callback` now records display-side feedback stats (revealed/dismissed/timed out) in plugin stats instead.
 
-The plugin resolves TaskFlow from `api.runtime.taskFlow` (via `fromToolContext` / `bindSession`) and delivers results through `subagent.run` — live-verified on 2026.8+ and 2026.9.x. If a future OpenClaw removes the top-level alias, switch to `api.runtime.tasks.managedFlows` (its noted 2026.8+ location).
+### Historical: OpenClaw 2.0 TaskFlow era (2026.8–2026.9.x)
+
+Prior methodology, kept for reference: OpenClaw 2026.8.1 restructured the plugin runtime API — `api.runtime.taskFlow` moved to `api.runtime.tasks.managedFlows`, and plugin runtime keys became `version`, `gateway`, `config`, `agent`, `subagent`, `system`, `media`, `mediaUnderstanding`, `tts`, `channel`, `events`, `logging`, `state`, `modelAuth`, `imageGeneration`, `videoGeneration`, `musicGeneration`, `llm`, `tasks`. The v1.7 plugin resolved TaskFlow from `api.runtime.taskFlow` via `fromToolContext` / `bindSession` and delivered results through `subagent.run`. This path is dead on 2026.10.2.
 
 ### General Methodology for OpenClaw 2.0 Plugin Updates
 
