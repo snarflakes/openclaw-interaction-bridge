@@ -233,5 +233,5 @@ Snarling can forward thermal sensor events to the plugin. The plugin formats the
 ## Install from ClawHub
 
 ```bash
-openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
+openclaw plugins install clawhub:openclaw-interaction-bridge-v2
 ```

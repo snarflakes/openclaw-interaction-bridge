@@ -223,5 +223,5 @@ No config file needed yet — when there are multiple adapters, a config-driven 
 ## Install from ClawHub
 
 ```bash
-openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
+openclaw plugins install clawhub:openclaw-interaction-bridge-v2
 ```

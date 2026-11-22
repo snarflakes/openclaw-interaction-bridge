@@ -249,7 +249,7 @@ The plugin receives presence and observation data from Snarling's thermal/enviro
 ## Install from ClawHub
 
 ```bash
-openclaw plugins install clawhub:@snarflakes/openclaw-interaction-bridge
+openclaw plugins install clawhub:openclaw-interaction-bridge-v2
 ```
 
 ## Development
